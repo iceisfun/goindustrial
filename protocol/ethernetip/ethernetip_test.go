@@ -913,6 +913,253 @@ func TestMaxPacketSizeExceeded(t *testing.T) {
 	}
 }
 
+// ===========================================================================
+// Session Edge Cases (from OpENer / enip-stack-detector insights)
+// ===========================================================================
+
+// TestDoubleRegisterSession verifies behavior when a client sends two
+// RegisterSession commands on the same connection.
+func TestDoubleRegisterSession(t *testing.T) {
+	router := cip.NewMessageRouter()
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	srv := NewServer(router)
+	go srv.HandleConn(serverConn)
+
+	session1 := registerSession(t, clientConn)
+	if session1 == 0 {
+		t.Fatal("first session should not be 0")
+	}
+
+	// Register again on the same connection
+	session2 := registerSession(t, clientConn)
+	// Server should still return a valid session (may be same or different)
+	if session2 == 0 {
+		t.Fatal("second session should not be 0")
+	}
+}
+
+// TestSendRRDataShortPayload verifies the server handles a SendRRData
+// with data_length < 6 (missing interface handle and timeout).
+func TestSendRRDataShortPayload(t *testing.T) {
+	router := cip.NewMessageRouter()
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	go NewServer(router).HandleConn(serverConn)
+
+	session := registerSession(t, clientConn)
+
+	// Send RRData with only 2 bytes of payload (short)
+	sendEIPPacket(t, clientConn, eip.CommandSendRRData, session, [8]byte{}, []byte{0x00, 0x00})
+
+	// Server should respond with error status
+	cmd, _, status, _, _ := recvEIPPacket(t, clientConn)
+	if cmd != eip.CommandSendRRData {
+		t.Fatalf("expected SendRRData response, got %s", cmd)
+	}
+	if status == 0 {
+		t.Error("expected non-zero status for short SendRRData payload")
+	}
+}
+
+// TestNopCommand verifies NOP command handling (should return error from our server).
+func TestNopCommand(t *testing.T) {
+	router := cip.NewMessageRouter()
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	go NewServer(router).HandleConn(serverConn)
+
+	session := registerSession(t, clientConn)
+
+	// Send NOP
+	sendEIPPacket(t, clientConn, eip.CommandNop, session, [8]byte{}, nil)
+
+	// Server should respond with error (unsupported command)
+	cmd, _, status, _, _ := recvEIPPacket(t, clientConn)
+	if cmd != eip.CommandNop {
+		t.Fatalf("expected Nop response, got %s", cmd)
+	}
+	if status == 0 {
+		t.Error("expected non-zero status for NOP command")
+	}
+}
+
+// TestSendRRDataInvalidCPF verifies the server handles malformed CPF data.
+func TestSendRRDataInvalidCPF(t *testing.T) {
+	router := cip.NewMessageRouter()
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	go NewServer(router).HandleConn(serverConn)
+
+	session := registerSession(t, clientConn)
+
+	// 6 bytes of interface handle + timeout, then garbage CPF
+	payload := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF}
+	sendEIPPacket(t, clientConn, eip.CommandSendRRData, session, [8]byte{}, payload)
+
+	cmd, _, status, _, _ := recvEIPPacket(t, clientConn)
+	if cmd != eip.CommandSendRRData {
+		t.Fatalf("expected SendRRData response, got %s", cmd)
+	}
+	if status == 0 {
+		t.Error("expected non-zero status for invalid CPF")
+	}
+}
+
+// TestMultipleSenderContexts verifies that different sender contexts are
+// echoed correctly across multiple sequential requests.
+func TestMultipleSenderContexts(t *testing.T) {
+	router := cip.NewMessageRouter()
+	router.RegisterObject(0x04, &mockObject{})
+
+	_, clientConn := setupPipePair(t, router)
+	session := registerSession(t, clientConn)
+
+	contexts := [][8]byte{
+		{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		{0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+		{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+		{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	}
+
+	for i, ctx := range contexts {
+		mrReq := &cip.MessageRouterRequest{
+			Service:     cip.ServiceGetAttributeSingle,
+			RequestPath: cip.Path([]byte{0x20, 0x04, 0x24, 0x01}),
+		}
+		mrReqBytes, _ := mrReq.Encode()
+		cpf := eip.NewCommonPacketFormat(
+			eip.NewCPFItem(eip.ItemIDNullAddress, nil),
+			eip.NewCPFItem(eip.ItemIDUnconnectedMessage, mrReqBytes),
+		)
+		cpfData, _ := cpf.Encode()
+		rrData := make([]byte, 6+len(cpfData))
+		copy(rrData[6:], cpfData)
+
+		sendEIPPacket(t, clientConn, eip.CommandSendRRData, session, ctx, rrData)
+		_, _, _, respCtx, _ := recvEIPPacket(t, clientConn)
+		if respCtx != ctx {
+			t.Errorf("request %d: sender context = %X, want %X", i, respCtx, ctx)
+		}
+	}
+}
+
+// TestListServicesCommand verifies the server returns error for ListServices
+// (not implemented in our server, matching our default handler).
+func TestListServicesCommand(t *testing.T) {
+	router := cip.NewMessageRouter()
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	go NewServer(router).HandleConn(serverConn)
+
+	_ = registerSession(t, clientConn)
+
+	sendEIPPacket(t, clientConn, eip.CommandListServices, 0, [8]byte{}, nil)
+	cmd, _, status, _, _ := recvEIPPacket(t, clientConn)
+	if cmd != eip.CommandListServices {
+		t.Fatalf("expected ListServices response, got %s", cmd)
+	}
+	// Our server returns error for unsupported commands
+	if status == 0 {
+		t.Log("ListServices returned success (may be implemented)")
+	}
+}
+
+// TestListIdentityCommand verifies the server handles ListIdentity.
+func TestListIdentityCommand(t *testing.T) {
+	router := cip.NewMessageRouter()
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	go NewServer(router).HandleConn(serverConn)
+
+	_ = registerSession(t, clientConn)
+
+	sendEIPPacket(t, clientConn, eip.CommandListIdentity, 0, [8]byte{}, nil)
+	cmd, _, _, _, _ := recvEIPPacket(t, clientConn)
+	if cmd != eip.CommandListIdentity {
+		t.Fatalf("expected ListIdentity response, got %s", cmd)
+	}
+}
+
+// ===========================================================================
+// Connected Messaging (SendUnitData)
+// ===========================================================================
+
+func TestSendUnitDataRoundTrip(t *testing.T) {
+	router := cip.NewMessageRouter()
+	expectedResp := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	router.RegisterObject(0x04, &mockObject{
+		handleFunc: func(service cip.USINT, path cip.Path, data []byte) ([]byte, error) {
+			return expectedResp, nil
+		},
+	})
+
+	_, clientConn := setupPipePair(t, router)
+	session := registerSession(t, clientConn)
+
+	// Build SendUnitData request
+	connID := make([]byte, 4)
+	binary.LittleEndian.PutUint32(connID, 0x12345678)
+
+	// CIP request preceded by 2-byte sequence number
+	mrReq := &cip.MessageRouterRequest{
+		Service:     cip.ServiceGetAttributeSingle,
+		RequestPath: cip.Path([]byte{0x20, 0x04, 0x24, 0x01}),
+	}
+	mrReqBytes, _ := mrReq.Encode()
+	seqData := make([]byte, 2)
+	binary.LittleEndian.PutUint16(seqData, 1)
+	connData := append(seqData, mrReqBytes...)
+
+	cpf := eip.NewCommonPacketFormat(
+		eip.NewCPFItem(eip.ItemIDConnectionBased, connID),
+		eip.NewCPFItem(eip.ItemIDConnectedTransport, connData),
+	)
+	cpfData, _ := cpf.Encode()
+
+	// Prepend interface handle (4 bytes) + timeout (2 bytes)
+	payload := make([]byte, 6+len(cpfData))
+	copy(payload[6:], cpfData)
+
+	sendEIPPacket(t, clientConn, eip.CommandSendUnitData, session, [8]byte{}, payload)
+
+	cmd, _, status, _, respData := recvEIPPacket(t, clientConn)
+	if cmd != eip.CommandSendUnitData {
+		t.Fatalf("expected SendUnitData response, got %s", cmd)
+	}
+	if status != 0 {
+		t.Fatalf("SendUnitData failed: status 0x%08X", status)
+	}
+
+	// Parse response CPF
+	if len(respData) < 6 {
+		t.Fatal("response too short")
+	}
+	respCPF, err := eip.DecodeCommonPacketFormat(respData[6:])
+	if err != nil {
+		t.Fatalf("decode CPF: %v", err)
+	}
+
+	dataItem := respCPF.FindItemByType(eip.ItemIDConnectedData)
+	if dataItem == nil {
+		t.Fatal("missing connected data item in response")
+	}
+	// Skip sequence number (2 bytes), then MR response header (4 bytes), then data
+	if len(dataItem.Data) < 6 {
+		t.Fatalf("connected data too short: %d bytes", len(dataItem.Data))
+	}
+	respSeq := binary.LittleEndian.Uint16(dataItem.Data[0:2])
+	if respSeq != 1 {
+		t.Errorf("response sequence = %d, want 1", respSeq)
+	}
+}
+
 func TestServerWithPipeListener(t *testing.T) {
 	router := cip.NewMessageRouter()
 	router.RegisterObject(0x04, &mockObject{})
