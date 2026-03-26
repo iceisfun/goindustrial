@@ -1,0 +1,304 @@
+package monitor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"sync"
+	"time"
+
+	"github.com/iceisfun/goindustrial/logging"
+	"github.com/iceisfun/goindustrial/plc"
+)
+
+// ErrMonitorClosed is returned when an operation targets a stopped Monitor.
+var ErrMonitorClosed = errors.New("monitor is closed")
+
+// Snapshot holds the latest value of a monitored data point.
+type Snapshot struct {
+	Point     plc.DataPoint
+	Value     plc.Value
+	Timestamp time.Time
+}
+
+// Event is emitted by the monitor on each poll cycle.
+type Event struct {
+	SubscriptionID int64
+	Snapshot       Snapshot
+	Err            error
+	Changed        bool
+}
+
+// ChangeDetector determines if a value has changed between two snapshots.
+type ChangeDetector interface {
+	Detect(prev, curr Snapshot) bool
+}
+
+// Handler is called after a successful poll.
+type Handler func(Snapshot)
+
+// Monitor polls data points on a schedule and emits events.
+type Monitor struct {
+	reader plc.Reader
+	logger logging.Logger
+
+	mu      sync.RWMutex
+	subs    map[int64]*subscription
+	closed  bool
+	nextID  int64
+	stopCh  chan struct{}
+	events  chan Event
+	closeMx sync.Once
+	wg      sync.WaitGroup
+}
+
+// NewMonitor creates a monitor bound to the provided reader.
+func NewMonitor(reader plc.Reader, opts ...MonitorOption) (*Monitor, error) {
+	if reader == nil {
+		return nil, errors.New("monitor requires a reader")
+	}
+
+	cfg := monitorConfig{eventBuffer: 64}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	logger := cfg.logger
+	if logger == nil {
+		logger = logging.NewNopLogger()
+	}
+
+	return &Monitor{
+		reader: reader,
+		logger: logger,
+		subs:   make(map[int64]*subscription),
+		stopCh: make(chan struct{}),
+		events: make(chan Event, cfg.eventBuffer),
+	}, nil
+}
+
+// Events exposes the receive-only event stream.
+func (m *Monitor) Events() <-chan Event {
+	return m.events
+}
+
+// Close stops the monitor and all active subscriptions.
+func (m *Monitor) Close() {
+	m.closeMx.Do(func() {
+		close(m.stopCh)
+
+		m.mu.Lock()
+		subs := make([]*subscription, 0, len(m.subs))
+		for _, sub := range m.subs {
+			subs = append(subs, sub)
+		}
+		m.closed = true
+		m.subs = make(map[int64]*subscription)
+		m.mu.Unlock()
+
+		for _, sub := range subs {
+			sub.stop()
+		}
+
+		m.wg.Wait()
+		close(m.events)
+	})
+}
+
+// Subscribe registers a data point to poll. Returns a Subscription handle
+// that can be used to stop polling for this specific point.
+func (m *Monitor) Subscribe(point plc.DataPoint, opts ...SubscriptionOption) (*Subscription, error) {
+	if point == nil {
+		return nil, errors.New("data point is required")
+	}
+
+	cfg := defaultSubConfig()
+	for _, opt := range opts {
+		if err := opt(cfg); err != nil {
+			return nil, err
+		}
+	}
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, ErrMonitorClosed
+	}
+	m.nextID++
+	id := m.nextID
+	sub := newSubscription(id, point, *cfg, m)
+	m.subs[id] = sub
+	m.wg.Add(1)
+	m.mu.Unlock()
+
+	go func() {
+		defer m.wg.Done()
+		sub.run()
+	}()
+
+	return &Subscription{monitor: m, id: id}, nil
+}
+
+func (m *Monitor) removeSubscription(id int64) {
+	m.mu.Lock()
+	sub, ok := m.subs[id]
+	if ok {
+		delete(m.subs, id)
+	}
+	m.mu.Unlock()
+
+	if ok {
+		sub.stop()
+	}
+}
+
+func (m *Monitor) emit(event Event) {
+	select {
+	case <-m.stopCh:
+		return
+	default:
+	}
+
+	select {
+	case <-m.stopCh:
+	case m.events <- event:
+	default:
+	}
+}
+
+// Subscription represents a running polling routine.
+type Subscription struct {
+	monitor *Monitor
+	id      int64
+	once    sync.Once
+}
+
+// ID returns the subscription identifier used in events.
+func (s *Subscription) ID() int64 { return s.id }
+
+// Stop cancels the subscription.
+func (s *Subscription) Stop() {
+	if s.monitor == nil {
+		return
+	}
+	s.once.Do(func() {
+		s.monitor.removeSubscription(s.id)
+	})
+}
+
+type subscription struct {
+	id           int64
+	point        plc.DataPoint
+	frequency    time.Duration
+	readVariance time.Duration
+	handler      Handler
+	detector     ChangeDetector
+	immediate    bool
+
+	monitor *Monitor
+	prev    *Snapshot
+
+	stopOnce sync.Once
+	stopCh   chan struct{}
+	doneCh   chan struct{}
+}
+
+func newSubscription(id int64, point plc.DataPoint, cfg subConfig, monitor *Monitor) *subscription {
+	return &subscription{
+		id:           id,
+		point:        point,
+		frequency:    cfg.frequency,
+		readVariance: cfg.readVariance,
+		handler:      cfg.handler,
+		detector:     cfg.detector,
+		immediate:    cfg.immediate,
+		monitor:      monitor,
+		stopCh:       make(chan struct{}),
+		doneCh:       make(chan struct{}),
+	}
+}
+
+func (s *subscription) run() {
+	defer close(s.doneCh)
+
+	if s.immediate {
+		s.poll()
+	}
+
+	for {
+		delay := s.frequency
+		if s.readVariance > 0 {
+			variance := time.Duration(rand.Int64N(int64(s.readVariance)*2+1)) - s.readVariance
+			delay += variance
+			if delay < 0 {
+				delay = 0
+			}
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+			s.poll()
+		case <-s.stopCh:
+			timer.Stop()
+			return
+		case <-s.monitor.stopCh:
+			timer.Stop()
+			return
+		}
+	}
+}
+
+func (s *subscription) stop() {
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		<-s.doneCh
+	})
+}
+
+func (s *subscription) poll() {
+	ts := time.Now()
+	ctx := context.Background()
+
+	values, err := s.monitor.reader.Read(ctx, s.point)
+	if err != nil {
+		s.monitor.logger.Warn(ctx, "monitor read failed for %s: %v", s.point.String(), err)
+		s.monitor.emit(Event{
+			SubscriptionID: s.id,
+			Snapshot:       Snapshot{Point: s.point, Timestamp: ts},
+			Err:            err,
+		})
+		return
+	}
+
+	if len(values) == 0 {
+		err := fmt.Errorf("monitor: no values returned for %s", s.point.String())
+		s.monitor.logger.Warn(ctx, err.Error())
+		s.monitor.emit(Event{SubscriptionID: s.id, Snapshot: Snapshot{Point: s.point, Timestamp: ts}, Err: err})
+		return
+	}
+
+	snapshot := Snapshot{
+		Point:     s.point,
+		Value:     values[0],
+		Timestamp: ts,
+	}
+
+	event := Event{
+		SubscriptionID: s.id,
+		Snapshot:       snapshot,
+		Changed:        true,
+	}
+
+	if s.detector != nil && s.prev != nil {
+		event.Changed = s.detector.Detect(*s.prev, snapshot)
+	}
+	s.prev = &snapshot
+
+	if event.Err == nil && s.handler != nil {
+		s.handler(snapshot)
+	}
+
+	s.monitor.emit(event)
+}
