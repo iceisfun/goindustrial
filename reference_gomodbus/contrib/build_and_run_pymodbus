@@ -1,0 +1,11 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE_NAME="pymodbus-server:latest"
+
+echo "Building PyModbus Docker image..."
+docker build -t "$IMAGE_NAME" -f "$SCRIPT_DIR/Dockerfile.pymodbus" "$SCRIPT_DIR"
+
+echo "Running PyModbus server container with host networking..."
+docker run --rm -it --net host --name gomodbus_pymodbus_test_server "$IMAGE_NAME"

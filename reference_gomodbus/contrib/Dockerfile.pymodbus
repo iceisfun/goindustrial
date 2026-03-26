@@ -1,0 +1,16 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install pymodbus and dependencies
+RUN pip install --no-cache-dir pymodbus==3.1.3 prompt_toolkit==3.0.38
+
+# Copy the server script into the container
+COPY server.py /app/server.py
+RUN chmod +x /app/server.py
+
+# Expose the Modbus TCP port
+EXPOSE 502
+
+# Run the server
+CMD ["python", "/app/server.py"]
