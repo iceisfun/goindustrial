@@ -106,6 +106,28 @@ for evt := range m.Events() {
 }
 ```
 
+### Adaptive Read Clustering
+
+Wrap a Modbus client in a `ClusteringReader` to coalesce nearby register reads into block reads, reducing Modbus TCP requests:
+
+```go
+modbusClient, _ := modbus.Connect(ctx, "192.168.1.100")
+
+// Wrap with clustering — nearby addresses are merged into single reads.
+clustered := monitor.NewClusteringReader(modbusClient,
+    monitor.WithGapThreshold(32),        // merge if gap ≤ 32 registers
+    monitor.WithMaxRegistersPerRead(120), // protocol-safe block size
+    // monitor.WithClusteringEnabled(false), // force OFF
+)
+
+mon, _ := monitor.NewMonitor(clustered)
+
+// These 3 subscriptions produce 1 Modbus request instead of 3.
+mon.Subscribe(modbus.HoldingRegister{Addr: 100, Qty: 1}, ...)
+mon.Subscribe(modbus.HoldingRegister{Addr: 101, Qty: 1}, ...)
+mon.Subscribe(modbus.HoldingRegister{Addr: 102, Qty: 1}, ...)
+```
+
 ### Lua Scripting (Optional)
 
 The `lua/` package provides [GoLua](https://github.com/iceisfun/golua) bindings so Lua scripts can drive Modbus and EtherNet/IP operations. This is useful for user-configurable data collection, alerting, and transformation logic without recompiling Go code.

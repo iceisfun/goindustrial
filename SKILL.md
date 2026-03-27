@@ -25,6 +25,8 @@ SKILLS:
 - Both protocols support reconnecting transports: transport.NewReconnectingTransport[C](connector, closer, opts...).
 - Functional options everywhere: modbus.WithRetries(3), modbus.WithUnitID(1), ethernetip.WithRetryDelay(2*time.Second), etc.
 - Monitor polls any plc.Reader: monitor.NewMonitor(reader) -> m.Subscribe(dataPoint, monitor.WithFrequency(100*ms)).
+- Adaptive read clustering: monitor.NewClusteringReader(modbusClient, monitor.WithGapThreshold(32)) wraps a reader to coalesce nearby Modbus addresses into block reads. Reduces N subscriptions from N requests to ~1 per cluster. Supports cache TTL for cross-goroutine sharing, singleflight dedup, and WithClusteringEnabled(false) to force OFF.
+- Clusterable interface: Modbus data point types (HoldingRegister, InputRegister, Coil, DiscreteInput) implement ClusterKey/ClusterAddr/ClusterQty/ClusterMerge/ClusterExtract for protocol-agnostic clustering.
 - Modbus data areas: Coils (bool R/W), Discrete Inputs (bool R), Holding Registers (uint16 R/W), Input Registers (uint16 R).
 - CIP data types: BOOL(0xC1), SINT(int8), INT(int16), DINT(int32), LINT(int64), USINT(uint8), UINT(uint16), UDINT(uint32), ULINT(uint64), REAL(float32), LREAL(float64), STRING(0xD0).
 - Error classification: Modbus protocol errors (IsModbusError) are not retried; transport errors trigger Reset + retry. Same pattern for EIP: cipError not retried, transport errors retried.
@@ -382,6 +384,28 @@ for evt := range sub.All() {
 ```
 
 Multiple subscribers each receive all events (broadcast). Each has its own buffered channel — a slow subscriber never blocks the monitor or others.
+
+### Adaptive Read Clustering
+
+Wrap a Modbus client in `ClusteringReader` to coalesce nearby addresses into block reads:
+
+```go
+clustered := monitor.NewClusteringReader(modbusClient,
+    monitor.WithGapThreshold(32),         // merge addresses within 32-register gap
+    monitor.WithMaxRegistersPerRead(120),  // cap block size (Modbus limit: 125)
+    monitor.WithMaxCoilsPerRead(2000),     // cap coil block size
+    monitor.WithCacheTTL(200*time.Millisecond), // optional: share reads across goroutines
+    // monitor.WithClusteringEnabled(false), // force OFF — passthrough mode
+)
+
+mon, _ := monitor.NewMonitor(clustered)
+// Subscribe auto-registers points with the ClusteringReader.
+// 10 adjacent registers → 1 Modbus request instead of 10.
+```
+
+The `Clusterable` interface allows any data point type to participate in clustering. All four Modbus types (`HoldingRegister`, `InputRegister`, `Coil`, `DiscreteInput`) implement it. Coil extraction handles bit-level packing correctly.
+
+Singleflight deduplication prevents concurrent subscription goroutines from issuing duplicate reads for the same cluster.
 
 ## Implicit I/O (Cyclic Messaging)
 
