@@ -13,6 +13,7 @@ type MonitorOption func(*monitorConfig)
 type monitorConfig struct {
 	logger      logging.Logger
 	eventBuffer int
+	connectedCh <-chan struct{}
 }
 
 // WithLogger sets the logger used by the monitor for warnings and diagnostics.
@@ -35,6 +36,22 @@ func WithEventBuffer(size int) MonitorOption {
 	}
 }
 
+// WithConnected provides a channel that gates subscription polling. When set,
+// each subscription blocks until the channel is closed before performing its
+// initial read. This is typically wired to a [transport.WithOnConnect] callback
+// so that monitors wait for the PLC connection before polling:
+//
+//	connected := make(chan struct{})
+//	tp := transport.NewReconnectingTransport(connector, closer,
+//	    transport.WithOnConnect(func() { close(connected) }),
+//	)
+//	mon, _ := monitor.NewMonitor(reader, monitor.WithConnected(connected))
+func WithConnected(ch <-chan struct{}) MonitorOption {
+	return func(cfg *monitorConfig) {
+		cfg.connectedCh = ch
+	}
+}
+
 // SubscriptionOption configures a subscription created by [Monitor.Subscribe].
 type SubscriptionOption func(*subConfig) error
 
@@ -43,13 +60,13 @@ type subConfig struct {
 	readVariance time.Duration
 	handler      Handler
 	detector     ChangeDetector
-	immediate    bool
+	initialDelay time.Duration
 }
 
 func defaultSubConfig() *subConfig {
 	return &subConfig{
-		frequency: 500 * time.Millisecond,
-		immediate: true,
+		frequency:    500 * time.Millisecond,
+		initialDelay: 50 * time.Millisecond,
 	}
 }
 
@@ -102,12 +119,16 @@ func WithHandler(handler Handler) SubscriptionOption {
 	}
 }
 
-// WithInitialRead controls whether a subscription performs an immediate read
-// when created, before waiting for the first poll interval. The default is
-// true.
-func WithInitialRead(enabled bool) SubscriptionOption {
+// WithInitialRead sets the delay before the first read after a subscription
+// is created. Zero means the first read happens immediately; a positive
+// duration defers it by that amount. The default is 50ms. Negative values
+// are rejected.
+func WithInitialRead(delay time.Duration) SubscriptionOption {
 	return func(cfg *subConfig) error {
-		cfg.immediate = enabled
+		if delay < 0 {
+			return fmt.Errorf("initial read delay cannot be negative")
+		}
+		cfg.initialDelay = delay
 		return nil
 	}
 }

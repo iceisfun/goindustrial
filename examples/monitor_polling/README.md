@@ -141,7 +141,7 @@ You can use **both** approaches simultaneously. The handler fires first, then th
 | `WithReadVariance(d)` | Random jitter added to poll timing to prevent thundering herd |
 | `WithChangeDetector(d)` | Attach a change detector (e.g., `ByteChangeDetector{}`) |
 | `WithHandler(fn)` | Per-subscription callback fired after each successful read |
-| `WithInitialRead(true)` | Perform an immediate read when the subscription is created |
+| `WithInitialRead(d)` | Delay before the first read (0 = immediate). Default: 50ms |
 
 ## Monitor Options
 

@@ -233,9 +233,10 @@ func main() {
 			}
 		}),
 
-		// WithInitialRead triggers an immediate read when the subscription
-		// is created, instead of waiting for the first tick.
-		monitor.WithInitialRead(true),
+		// WithInitialRead(0) triggers an immediate read when the subscription
+		// is created. A positive duration delays the first read by that amount
+		// (default 50ms).
+		monitor.WithInitialRead(0),
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to subscribe to Modbus register: %v\n", err)
@@ -271,7 +272,7 @@ func main() {
 				snap.Timestamp.Format("15:04:05"),
 				snap.Point.String(), snap.Value.Raw, len(snap.Value.Raw))
 		}),
-		monitor.WithInitialRead(true),
+		monitor.WithInitialRead(0),
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to subscribe to EtherNet/IP tag: %v\n", err)

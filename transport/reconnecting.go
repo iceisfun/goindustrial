@@ -66,9 +66,7 @@ func (r *ReconnectingTransport[C]) Conn(ctx context.Context) (C, error) {
 
 	r.conn = conn
 
-	if r.cfg.OnConnect != nil {
-		r.cfg.OnConnect()
-	}
+	r.cfg.fireOnConnect()
 
 	return conn, nil
 }
@@ -95,9 +93,7 @@ func (r *ReconnectingTransport[C]) Reset(stale C) error {
 	err := r.closer.Close(r.conn)
 	r.conn = r.zero
 
-	if r.cfg.OnDisconnect != nil {
-		r.cfg.OnDisconnect(err)
-	}
+	r.cfg.fireOnDisconnect(err)
 
 	return nil
 }
@@ -119,9 +115,7 @@ func (r *ReconnectingTransport[C]) Close() error {
 
 	err := r.closer.Close(r.conn)
 
-	if r.cfg.OnDisconnect != nil {
-		r.cfg.OnDisconnect(err)
-	}
+	r.cfg.fireOnDisconnect(err)
 
 	r.conn = r.zero
 	return err

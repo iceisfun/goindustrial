@@ -125,7 +125,7 @@ func TestMonitorSubscriptionStop(t *testing.T) {
 
 	sub, err := m.Subscribe(testPoint{name: "tag1"},
 		WithFrequency(20*time.Millisecond),
-		WithInitialRead(false),
+		WithInitialRead(0),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -281,7 +281,8 @@ func TestSubscriptionStopCancelsBlockedRead(t *testing.T) {
 	defer m.Close()
 
 	sub, err := m.Subscribe(testPoint{name: "blocking"},
-		WithFrequency(time.Hour), // long interval; only the immediate read matters
+		WithFrequency(time.Hour), // long interval; only the initial read matters
+		WithInitialRead(0),       // immediate
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -316,6 +317,119 @@ func TestSubscriptionStopCancelsBlockedRead(t *testing.T) {
 	}
 }
 
+func TestWithInitialReadDelay(t *testing.T) {
+	reader := &stubReader{values: []byte{0x01}}
+	m, err := NewMonitor(reader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer m.Close()
+
+	_, err = m.Subscribe(testPoint{name: "delayed"},
+		WithFrequency(time.Hour),
+		WithInitialRead(100*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// No read should happen immediately.
+	time.Sleep(20 * time.Millisecond)
+	if n := reader.callCount.Load(); n != 0 {
+		t.Fatalf("expected 0 reads during delay, got %d", n)
+	}
+
+	// After the delay, exactly one read should fire.
+	time.Sleep(120 * time.Millisecond)
+	if n := reader.callCount.Load(); n != 1 {
+		t.Fatalf("expected 1 read after delay, got %d", n)
+	}
+}
+
+func TestWithConnectedGatesPolling(t *testing.T) {
+	reader := &stubReader{values: []byte{0x01}}
+	connected := make(chan struct{})
+
+	m, err := NewMonitor(reader, WithConnected(connected))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer m.Close()
+
+	_, err = m.Subscribe(testPoint{name: "gated"},
+		WithFrequency(time.Hour),
+		WithInitialRead(0),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// No read should happen while connected channel is open.
+	time.Sleep(50 * time.Millisecond)
+	if n := reader.callCount.Load(); n != 0 {
+		t.Fatalf("expected 0 reads before connected, got %d", n)
+	}
+
+	// Signal connected — the initial read should fire.
+	close(connected)
+	time.Sleep(50 * time.Millisecond)
+	if n := reader.callCount.Load(); n != 1 {
+		t.Fatalf("expected 1 read after connected, got %d", n)
+	}
+}
+
+func TestWithConnectedStopDuringWait(t *testing.T) {
+	reader := &stubReader{values: []byte{0x01}}
+	connected := make(chan struct{}) // never closed
+
+	m, err := NewMonitor(reader, WithConnected(connected))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer m.Close()
+
+	sub, err := m.Subscribe(testPoint{name: "gated-stop"},
+		WithFrequency(time.Hour),
+		WithInitialRead(0),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Stop while waiting for connected — should not hang.
+	done := make(chan struct{})
+	go func() {
+		sub.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout: Stop() hung while waiting for connected channel")
+	}
+
+	if n := reader.callCount.Load(); n != 0 {
+		t.Fatalf("expected 0 reads, got %d", n)
+	}
+}
+
+func TestWithInitialReadNegativeRejected(t *testing.T) {
+	reader := &stubReader{values: []byte{0x01}}
+	m, err := NewMonitor(reader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer m.Close()
+
+	_, err = m.Subscribe(testPoint{name: "neg"},
+		WithInitialRead(-1),
+	)
+	if err == nil {
+		t.Fatal("expected error for negative initial read delay")
+	}
+}
+
 func TestMonitorCloseCancelsBlockedRead(t *testing.T) {
 	br := newBlockingReader()
 	m, err := NewMonitor(br)
@@ -325,6 +439,7 @@ func TestMonitorCloseCancelsBlockedRead(t *testing.T) {
 
 	_, err = m.Subscribe(testPoint{name: "blocking"},
 		WithFrequency(time.Hour),
+		WithInitialRead(0),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

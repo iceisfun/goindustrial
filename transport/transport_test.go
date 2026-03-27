@@ -315,3 +315,36 @@ func TestReconnectingTransportCallbacks(t *testing.T) {
 		t.Errorf("expected 2 disconnect callbacks, got %d", disconnectCount)
 	}
 }
+
+func TestMultipleCallbacks(t *testing.T) {
+	var counter atomic.Int32
+	var a, b int
+	ctx := context.Background()
+
+	rt := NewReconnectingTransport(newMockConnector(&counter, 0), newMockCloser(),
+		WithOnConnect(func() { a++ }),
+		WithOnConnect(func() { b += 10 }),
+		WithOnDisconnect(func(error) { a += 100 }),
+		WithOnDisconnect(func(error) { b += 1000 }),
+	)
+
+	conn, _ := rt.Conn(ctx)
+	if a != 1 || b != 10 {
+		t.Errorf("after connect: a=%d b=%d, want a=1 b=10", a, b)
+	}
+
+	rt.Reset(conn)
+	if a != 101 || b != 1010 {
+		t.Errorf("after reset: a=%d b=%d, want a=101 b=1010", a, b)
+	}
+
+	rt.Conn(ctx)
+	if a != 102 || b != 1020 {
+		t.Errorf("after reconnect: a=%d b=%d, want a=102 b=1020", a, b)
+	}
+
+	rt.Close()
+	if a != 202 || b != 2020 {
+		t.Errorf("after close: a=%d b=%d, want a=202 b=2020", a, b)
+	}
+}

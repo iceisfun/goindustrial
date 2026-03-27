@@ -101,7 +101,7 @@ func main() {
 		monitor.WithFrequency(*interval),
 		monitor.WithReadVariance(10*time.Millisecond),
 		monitor.WithChangeDetector(monitor.ByteChangeDetector{}),
-		monitor.WithInitialRead(true),
+		monitor.WithInitialRead(0),
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to subscribe: %v\n", err)

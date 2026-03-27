@@ -78,6 +78,10 @@ type Monitor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// connectedCh, when non-nil, gates subscription polling until it is
+	// closed. See [WithConnected].
+	connectedCh <-chan struct{}
+
 	subscriberMu sync.RWMutex
 	subscribers  map[*Subscriber]struct{}
 }
@@ -111,6 +115,7 @@ func NewMonitor(reader plc.Reader, opts ...MonitorOption) (*Monitor, error) {
 		events:      make(chan Event, cfg.eventBuffer),
 		ctx:         ctx,
 		cancel:      cancel,
+		connectedCh: cfg.connectedCh,
 		subscribers: make(map[*Subscriber]struct{}),
 	}, nil
 }
@@ -311,7 +316,7 @@ type subscription struct {
 	readVariance time.Duration
 	handler      Handler
 	detector     ChangeDetector
-	immediate    bool
+	initialDelay time.Duration
 
 	monitor *Monitor
 	prev    *Snapshot
@@ -336,7 +341,7 @@ func newSubscription(id int64, point plc.DataPoint, cfg subConfig, monitor *Moni
 		readVariance: cfg.readVariance,
 		handler:      cfg.handler,
 		detector:     cfg.detector,
-		immediate:    cfg.immediate,
+		initialDelay: cfg.initialDelay,
 		monitor:      monitor,
 		ctx:          ctx,
 		cancel:       cancel,
@@ -348,8 +353,32 @@ func newSubscription(id int64, point plc.DataPoint, cfg subConfig, monitor *Moni
 func (s *subscription) run() {
 	defer close(s.doneCh)
 
-	if s.immediate {
+	// Wait for the connected signal if the monitor has one.
+	if ch := s.monitor.connectedCh; ch != nil {
+		select {
+		case <-ch:
+		case <-s.stopCh:
+			return
+		case <-s.monitor.stopCh:
+			return
+		}
+	}
+
+	// Initial read: immediate or after a configured delay.
+	if s.initialDelay == 0 {
 		s.poll()
+	} else {
+		timer := time.NewTimer(s.initialDelay)
+		select {
+		case <-timer.C:
+			s.poll()
+		case <-s.stopCh:
+			timer.Stop()
+			return
+		case <-s.monitor.stopCh:
+			timer.Stop()
+			return
+		}
 	}
 
 	for {

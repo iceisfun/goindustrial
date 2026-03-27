@@ -30,9 +30,7 @@ func NewDirectTransport[C comparable](ctx context.Context, connector Connector[C
 		return nil, fmt.Errorf("direct transport connect: %w", err)
 	}
 
-	if cfg.OnConnect != nil {
-		cfg.OnConnect()
-	}
+	cfg.fireOnConnect()
 
 	return &DirectTransport[C]{
 		connector: connector,
@@ -81,9 +79,7 @@ func (d *DirectTransport[C]) Reset(stale C) error {
 	d.conn = d.zero
 	d.active = false
 
-	if d.cfg.OnDisconnect != nil {
-		d.cfg.OnDisconnect(err)
-	}
+	d.cfg.fireOnDisconnect(err)
 
 	return nil
 }
@@ -106,9 +102,7 @@ func (d *DirectTransport[C]) Close() error {
 	err := d.closer.Close(d.conn)
 	d.active = false
 
-	if d.cfg.OnDisconnect != nil {
-		d.cfg.OnDisconnect(err)
-	}
+	d.cfg.fireOnDisconnect(err)
 
 	d.conn = d.zero
 	return err
