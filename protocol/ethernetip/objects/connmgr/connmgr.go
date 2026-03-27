@@ -124,6 +124,20 @@ func (cm *ConnectionManager) HandleForwardOpen(reqData []byte) ([]byte, error) {
 	}
 
 	cm.mu.Lock()
+
+	// Reject duplicate connection triads per CIP spec Vol.1 §3-5.5.2.
+	for _, existing := range cm.connections {
+		if existing.ConnectionSerialNumber == req.ConnectionSerialNumber &&
+			existing.VendorID == req.VendorID &&
+			existing.OriginatorSerialNumber == req.OriginatorSerialNumber {
+			cm.mu.Unlock()
+			return nil, cip.Error{
+				Status:    cip.StatusConnectionFailure,
+				ExtStatus: []cip.UINT{ExtStatusConnectionInUse},
+			}
+		}
+	}
+
 	cm.nextConnID++
 	myConnID := cm.nextConnID
 

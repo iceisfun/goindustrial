@@ -254,42 +254,51 @@ func TestConnectionTracking(t *testing.T) {
 	cm.mu.RUnlock()
 }
 
-func TestDuplicateConnection(t *testing.T) {
+func TestDuplicateConnectionRejected(t *testing.T) {
 	cm := NewConnectionManager()
 	data := buildOpenRequest(t, 0x0001, 0x0042, 0xAAAA, connPath())
 
-	// Open the same triad twice.
+	// First open succeeds.
 	_, err := cm.HandleForwardOpen(data)
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
+
+	// Second open with the same triad must be rejected.
 	_, err = cm.HandleForwardOpen(data)
-	if err != nil {
-		t.Fatalf("second open: %v", err)
+	if err == nil {
+		t.Fatal("expected error for duplicate triad, got nil")
 	}
 
-	// The current implementation creates two separate connections (different
-	// server-assigned TOConnectionIDs) even for identical triads. Verify that
-	// both are tracked.
+	cipErr, ok := err.(cip.Error)
+	if !ok {
+		t.Fatalf("expected cip.Error, got %T: %v", err, err)
+	}
+	if cipErr.Status != cip.StatusConnectionFailure {
+		t.Errorf("status = 0x%02X, want 0x%02X", cipErr.Status, cip.StatusConnectionFailure)
+	}
+	if len(cipErr.ExtStatus) != 1 || cipErr.ExtStatus[0] != ExtStatusConnectionInUse {
+		t.Errorf("ExtStatus = %v, want [0x%04X]", cipErr.ExtStatus, ExtStatusConnectionInUse)
+	}
+
+	// Only one connection should be tracked.
 	cm.mu.RLock()
 	count := len(cm.connections)
 	cm.mu.RUnlock()
-
-	if count != 2 {
-		t.Errorf("tracked connections = %d, want 2", count)
+	if count != 1 {
+		t.Errorf("tracked connections = %d, want 1", count)
 	}
 
-	// Closing by triad removes only the first match; both share the same
-	// triad so two close calls are needed.
+	// Close it, then re-open should succeed.
 	closeData := buildCloseRequest(t, 0x0001, 0x0042, 0xAAAA, connPath())
-	cm.HandleForwardClose(closeData)
-	cm.HandleForwardClose(closeData)
+	_, err = cm.HandleForwardClose(closeData)
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
 
-	cm.mu.RLock()
-	remaining := len(cm.connections)
-	cm.mu.RUnlock()
-	if remaining != 0 {
-		t.Errorf("tracked connections after double close = %d, want 0", remaining)
+	_, err = cm.HandleForwardOpen(data)
+	if err != nil {
+		t.Fatalf("re-open after close: %v", err)
 	}
 }
 
