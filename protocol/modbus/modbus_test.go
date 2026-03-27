@@ -3031,3 +3031,92 @@ func TestServerShutdownDrain(t *testing.T) {
 	// Clean up.
 	clientConn.Close()
 }
+
+// TestServerMaxClients verifies the server rejects connections once the
+// configured max-client limit is reached, and allows new connections once
+// an existing client disconnects.
+func TestServerMaxClients(t *testing.T) {
+	const maxClients = 2
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	srv := NewServer("test",
+		WithServerListener(ln),
+		WithMaxClients(maxClients),
+	)
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	t.Cleanup(func() { srv.Stop(context.Background()) })
+
+	addr := ln.Addr().String()
+
+	conn1, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatalf("dial client 1: %v", err)
+	}
+	defer conn1.Close()
+
+	conn2, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatalf("dial client 2: %v", err)
+	}
+	defer conn2.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(srv.ConnectedClients()) >= maxClients {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(srv.ConnectedClients()); got != maxClients {
+		t.Fatalf("expected %d connected clients, got %d", maxClients, got)
+	}
+
+	// 3rd connection should be rejected.
+	conn3, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatalf("dial client 3: %v", err)
+	}
+	defer conn3.Close()
+
+	conn3.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	_, readErr := conn3.Read(buf)
+	if readErr == nil {
+		t.Fatal("expected 3rd client to be rejected, but read succeeded")
+	}
+
+	// Disconnect one client to free a slot.
+	conn1.Close()
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(srv.ConnectedClients()) < maxClients {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// New connection should now succeed.
+	conn4, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatalf("dial client 4: %v", err)
+	}
+	defer conn4.Close()
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(srv.ConnectedClients()) >= maxClients {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(srv.ConnectedClients()); got != maxClients {
+		t.Fatalf("expected %d connected clients after reconnect, got %d", maxClients, got)
+	}
+}

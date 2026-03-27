@@ -39,6 +39,9 @@ type Server struct {
 	onClientConnect    func(ConnectedClient)
 	onClientDisconnect func(ConnectedClient)
 
+	// Maximum number of simultaneous client connections (0 = unlimited).
+	maxClients int
+
 	// Identity for ListIdentity responses.
 	identity eip.ListIdentityItem
 }
@@ -78,6 +81,15 @@ func WithServerConn(conn net.Conn) ServerOption {
 func WithIdentity(id eip.ListIdentityItem) ServerOption {
 	return func(s *Server) {
 		s.identity = id
+	}
+}
+
+// WithMaxClients sets the maximum number of simultaneous client connections.
+// When the limit is reached, new connections are closed immediately.
+// A value of 0 (the default) means unlimited.
+func WithMaxClients(max int) ServerOption {
+	return func(s *Server) {
+		s.maxClients = max
 	}
 }
 
@@ -197,6 +209,19 @@ func (s *Server) acceptLoop() {
 			s.logger.Error(context.Background(), "accept error: %v", err)
 			continue
 		}
+
+		// Enforce max-client limit.
+		if s.maxClients > 0 {
+			s.clientsMu.RLock()
+			count := len(s.clients)
+			s.clientsMu.RUnlock()
+			if count >= s.maxClients {
+				s.logger.Warn(context.Background(), "max clients (%d) reached, rejecting %s", s.maxClients, conn.RemoteAddr())
+				conn.Close()
+				continue
+			}
+		}
+
 		go s.HandleConn(conn)
 	}
 }

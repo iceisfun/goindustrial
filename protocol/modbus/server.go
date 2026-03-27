@@ -43,6 +43,9 @@ type Server struct {
 	// Protocol handler for processing requests
 	protocol *serverProtocolHandler
 
+	// Maximum number of simultaneous client connections (0 = unlimited).
+	maxClients int
+
 	// injectedConn is a single pre-established connection supplied via
 	// WithServerConn. When set, the server skips the accept loop and
 	// handles this connection directly.
@@ -91,6 +94,15 @@ func WithServerListener(listener net.Listener) ServerOption {
 func WithServerConn(conn net.Conn) ServerOption {
 	return func(s *Server) {
 		s.injectedConn = conn
+	}
+}
+
+// WithMaxClients sets the maximum number of simultaneous client connections.
+// When the limit is reached, new connections are closed immediately.
+// A value of 0 (the default) means unlimited.
+func WithMaxClients(max int) ServerOption {
+	return func(s *Server) {
+		s.maxClients = max
 	}
 }
 
@@ -359,6 +371,19 @@ func (s *Server) acceptLoop(ctx context.Context) {
 		}
 
 		remoteAddr := conn.RemoteAddr().String()
+
+		// Enforce max-client limit.
+		if s.maxClients > 0 {
+			s.clientsMutex.RLock()
+			count := len(s.clients)
+			s.clientsMutex.RUnlock()
+			if count >= s.maxClients {
+				s.logger.Warn(ctx, "Max clients (%d) reached, rejecting %s", s.maxClients, remoteAddr)
+				conn.Close()
+				continue
+			}
+		}
+
 		s.logger.Info(ctx, "New client connected: %s", remoteAddr)
 
 		client := &clientConn{
