@@ -28,6 +28,13 @@ type Transport[C any] interface {
 	Reset(stale C) error
 
 	// Close permanently shuts down the transport.
+	//
+	// TODO: Close does not accept a context.Context, so callers cannot bound
+	// shutdown time. Adding a context parameter would be a breaking change to
+	// this public interface and all implementations (DirectTransport,
+	// ReconnectingTransport) and consumers (modbus.Client, ethernetip.Client).
+	// Consider introducing a CloseWithContext method or a new interface in a
+	// future major version.
 	Close() error
 }
 

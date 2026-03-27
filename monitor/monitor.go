@@ -52,6 +52,11 @@ type Monitor struct {
 	closeMx sync.Once
 	wg      sync.WaitGroup
 
+	// ctx is canceled when the monitor is closed. Subscription contexts are
+	// derived from it so that blocked reads are interrupted on shutdown.
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	subscriberMu sync.RWMutex
 	subscribers  map[*Subscriber]struct{}
 }
@@ -72,12 +77,16 @@ func NewMonitor(reader plc.Reader, opts ...MonitorOption) (*Monitor, error) {
 		logger = logging.NewNopLogger()
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	return &Monitor{
 		reader:      reader,
 		logger:      logger,
 		subs:        make(map[int64]*subscription),
 		stopCh:      make(chan struct{}),
 		events:      make(chan Event, cfg.eventBuffer),
+		ctx:         ctx,
+		cancel:      cancel,
 		subscribers: make(map[*Subscriber]struct{}),
 	}, nil
 }
@@ -134,6 +143,7 @@ func (m *Monitor) unregisterSubscriber(s *Subscriber) {
 // Close stops the monitor and all active subscriptions.
 func (m *Monitor) Close() {
 	m.closeMx.Do(func() {
+		m.cancel()
 		close(m.stopCh)
 
 		m.mu.Lock()
@@ -263,12 +273,19 @@ type subscription struct {
 	monitor *Monitor
 	prev    *Snapshot
 
+	// ctx is derived from the monitor's context and canceled when the
+	// subscription stops. It is passed to reader.Read so that blocked
+	// reads are interrupted on stop or monitor close.
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	stopOnce sync.Once
 	stopCh   chan struct{}
 	doneCh   chan struct{}
 }
 
 func newSubscription(id int64, point plc.DataPoint, cfg subConfig, monitor *Monitor) *subscription {
+	ctx, cancel := context.WithCancel(monitor.ctx)
 	return &subscription{
 		id:           id,
 		point:        point,
@@ -278,6 +295,8 @@ func newSubscription(id int64, point plc.DataPoint, cfg subConfig, monitor *Moni
 		detector:     cfg.detector,
 		immediate:    cfg.immediate,
 		monitor:      monitor,
+		ctx:          ctx,
+		cancel:       cancel,
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
 	}
@@ -316,6 +335,7 @@ func (s *subscription) run() {
 
 func (s *subscription) stop() {
 	s.stopOnce.Do(func() {
+		s.cancel()
 		close(s.stopCh)
 		<-s.doneCh
 	})
@@ -323,11 +343,10 @@ func (s *subscription) stop() {
 
 func (s *subscription) poll() {
 	ts := time.Now()
-	ctx := context.Background()
 
-	values, err := s.monitor.reader.Read(ctx, s.point)
+	values, err := s.monitor.reader.Read(s.ctx, s.point)
 	if err != nil {
-		s.monitor.logger.Warn(ctx, "monitor read failed for %s: %v", s.point.String(), err)
+		s.monitor.logger.Warn(s.ctx, "monitor read failed for %s: %v", s.point.String(), err)
 		s.monitor.emit(Event{
 			SubscriptionID: s.id,
 			Snapshot:       Snapshot{Point: s.point, Timestamp: ts},
@@ -338,7 +357,7 @@ func (s *subscription) poll() {
 
 	if len(values) == 0 {
 		err := fmt.Errorf("monitor: no values returned for %s", s.point.String())
-		s.monitor.logger.Warn(ctx, err.Error())
+		s.monitor.logger.Warn(s.ctx, err.Error())
 		s.monitor.emit(Event{SubscriptionID: s.id, Snapshot: Snapshot{Point: s.point, Timestamp: ts}, Err: err})
 		return
 	}

@@ -35,6 +35,28 @@ func (s *stubReader) Read(ctx context.Context, points ...plc.DataPoint) ([]plc.V
 	return results, nil
 }
 
+// blockingReader blocks until the context is canceled, simulating a
+// slow or stuck reader. It records the context error in ctxErr.
+type blockingReader struct {
+	started chan struct{} // closed when Read begins blocking
+	ctxErr  atomic.Value // stores the context.Err() observed on wakeup
+}
+
+func newBlockingReader() *blockingReader {
+	return &blockingReader{started: make(chan struct{})}
+}
+
+func (b *blockingReader) Read(ctx context.Context, points ...plc.DataPoint) ([]plc.Value, error) {
+	select {
+	case <-b.started:
+	default:
+		close(b.started)
+	}
+	<-ctx.Done()
+	b.ctxErr.Store(ctx.Err())
+	return nil, ctx.Err()
+}
+
 func TestMonitorSubscribeAndReceiveEvent(t *testing.T) {
 	reader := &stubReader{values: []byte{0x01, 0x02}}
 	m, err := NewMonitor(reader)
@@ -195,10 +217,8 @@ func TestMonitorCloseStopsAll(t *testing.T) {
 	// Should not block or panic.
 	m.Close()
 
-	// Events channel should be closed.
-	_, ok := <-m.Events()
-	if ok {
-		t.Error("expected events channel to be closed after Close()")
+	// Drain any buffered events, then verify the channel is closed.
+	for range m.Events() {
 	}
 }
 
@@ -249,5 +269,92 @@ func TestByteChangeDetector(t *testing.T) {
 	}
 	if !d.Detect(s1, s3) {
 		t.Error("different bytes should be detected as changed")
+	}
+}
+
+func TestSubscriptionStopCancelsBlockedRead(t *testing.T) {
+	br := newBlockingReader()
+	m, err := NewMonitor(br)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer m.Close()
+
+	sub, err := m.Subscribe(testPoint{name: "blocking"},
+		WithFrequency(time.Hour), // long interval; only the immediate read matters
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Wait for the reader to start blocking.
+	select {
+	case <-br.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for blocking read to start")
+	}
+
+	// Stopping the subscription should cancel the context and unblock Read.
+	done := make(chan struct{})
+	go func() {
+		sub.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for subscription stop; blocked read was not canceled")
+	}
+
+	stored := br.ctxErr.Load()
+	if stored == nil {
+		t.Fatal("expected context error to be recorded")
+	}
+	if stored != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", stored)
+	}
+}
+
+func TestMonitorCloseCancelsBlockedRead(t *testing.T) {
+	br := newBlockingReader()
+	m, err := NewMonitor(br)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	_, err = m.Subscribe(testPoint{name: "blocking"},
+		WithFrequency(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Wait for the reader to start blocking.
+	select {
+	case <-br.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for blocking read to start")
+	}
+
+	// Closing the monitor should cancel the context and unblock Read.
+	done := make(chan struct{})
+	go func() {
+		m.Close()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for monitor close; blocked read was not canceled")
+	}
+
+	stored := br.ctxErr.Load()
+	if stored == nil {
+		t.Fatal("expected context error to be recorded")
+	}
+	if stored != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", stored)
 	}
 }
