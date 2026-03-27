@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1048,8 +1049,7 @@ func TestMultipleSenderContexts(t *testing.T) {
 	}
 }
 
-// TestListServicesCommand verifies the server returns error for ListServices
-// (not implemented in our server, matching our default handler).
+// TestListServicesCommand verifies the server returns a valid ListServices response.
 func TestListServicesCommand(t *testing.T) {
 	router := cip.NewMessageRouter()
 	serverConn, clientConn := net.Pipe()
@@ -1060,30 +1060,64 @@ func TestListServicesCommand(t *testing.T) {
 	_ = registerSession(t, clientConn)
 
 	sendEIPPacket(t, clientConn, eip.CommandListServices, 0, [8]byte{}, nil)
-	cmd, _, status, _, _ := recvEIPPacket(t, clientConn)
+	cmd, _, status, _, data := recvEIPPacket(t, clientConn)
 	if cmd != eip.CommandListServices {
 		t.Fatalf("expected ListServices response, got %s", cmd)
 	}
-	// Our server returns error for unsupported commands
-	if status == 0 {
-		t.Log("ListServices returned success (may be implemented)")
+	if status != 0 {
+		t.Fatalf("ListServices failed: status 0x%08X", status)
+	}
+
+	items, err := eip.DecodeListServicesResponse(data)
+	if err != nil {
+		t.Fatalf("decode ListServices: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 service item, got %d", len(items))
+	}
+	if items[0].Name != "Communications" {
+		t.Errorf("service name = %q, want %q", items[0].Name, "Communications")
+	}
+	if items[0].CapabilityFlags&0x0020 == 0 {
+		t.Error("expected CIP encapsulation capability flag (0x0020)")
 	}
 }
 
-// TestListIdentityCommand verifies the server handles ListIdentity.
+// TestListIdentityCommand verifies the server returns a valid ListIdentity response.
 func TestListIdentityCommand(t *testing.T) {
 	router := cip.NewMessageRouter()
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
 
-	go NewServer(router).HandleConn(serverConn)
+	go NewServer(router, WithIdentity(eip.ListIdentityItem{
+		TypeID:      eip.ItemIDListIdentity,
+		VendorID:    42,
+		ProductName: "TestDevice",
+	})).HandleConn(serverConn)
 
 	_ = registerSession(t, clientConn)
 
 	sendEIPPacket(t, clientConn, eip.CommandListIdentity, 0, [8]byte{}, nil)
-	cmd, _, _, _, _ := recvEIPPacket(t, clientConn)
+	cmd, _, status, _, data := recvEIPPacket(t, clientConn)
 	if cmd != eip.CommandListIdentity {
 		t.Fatalf("expected ListIdentity response, got %s", cmd)
+	}
+	if status != 0 {
+		t.Fatalf("ListIdentity failed: status 0x%08X", status)
+	}
+
+	items, err := eip.DecodeListIdentityResponse(data)
+	if err != nil {
+		t.Fatalf("decode ListIdentity: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 identity item, got %d", len(items))
+	}
+	if items[0].VendorID != 42 {
+		t.Errorf("VendorID = %d, want 42", items[0].VendorID)
+	}
+	if items[0].ProductName != "TestDevice" {
+		t.Errorf("ProductName = %q, want %q", items[0].ProductName, "TestDevice")
 	}
 }
 
@@ -1160,6 +1194,341 @@ func TestSendUnitDataRoundTrip(t *testing.T) {
 	}
 }
 
+// ===========================================================================
+// Session Validation
+// ===========================================================================
+
+func TestSessionHandleUnique(t *testing.T) {
+	router := cip.NewMessageRouter()
+	srv := NewServer(router)
+
+	// First connection
+	s1, c1 := net.Pipe()
+	go srv.HandleConn(s1)
+	defer c1.Close()
+
+	// Second connection
+	s2, c2 := net.Pipe()
+	go srv.HandleConn(s2)
+	defer c2.Close()
+
+	h1 := registerSession(t, c1)
+	h2 := registerSession(t, c2)
+
+	if h1 == h2 {
+		t.Errorf("session handles should be unique: both got 0x%08X", h1)
+	}
+	if h1 == 0 || h2 == 0 {
+		t.Error("session handles must not be 0")
+	}
+}
+
+func TestSessionHandleValidation(t *testing.T) {
+	router := cip.NewMessageRouter()
+	router.RegisterObject(0x04, &mockObject{})
+
+	_, clientConn := setupPipePair(t, router)
+	session := registerSession(t, clientConn)
+
+	// Send SendRRData with wrong session handle
+	mrReq := &cip.MessageRouterRequest{
+		Service:     cip.ServiceGetAttributeSingle,
+		RequestPath: cip.Path([]byte{0x20, 0x04, 0x24, 0x01}),
+	}
+	mrReqBytes, _ := mrReq.Encode()
+	cpf := eip.NewCommonPacketFormat(
+		eip.NewCPFItem(eip.ItemIDNullAddress, nil),
+		eip.NewCPFItem(eip.ItemIDUnconnectedMessage, mrReqBytes),
+	)
+	cpfData, _ := cpf.Encode()
+	rrData := make([]byte, 6+len(cpfData))
+	copy(rrData[6:], cpfData)
+
+	// Use wrong session handle
+	wrongSession := session + 999
+	sendEIPPacket(t, clientConn, eip.CommandSendRRData, wrongSession, [8]byte{}, rrData)
+	_, _, status, _, _ := recvEIPPacket(t, clientConn)
+
+	if status != eip.StatusInvalidSessionHandle {
+		t.Fatalf("expected StatusInvalidSessionHandle (0x%08X), got 0x%08X",
+			eip.StatusInvalidSessionHandle, status)
+	}
+}
+
+func TestSessionHandleZeroRejected(t *testing.T) {
+	router := cip.NewMessageRouter()
+	router.RegisterObject(0x04, &mockObject{})
+
+	_, clientConn := setupPipePair(t, router)
+	_ = registerSession(t, clientConn)
+
+	// Send SendRRData with session handle 0 (not registered)
+	mrReq := &cip.MessageRouterRequest{
+		Service:     cip.ServiceGetAttributeSingle,
+		RequestPath: cip.Path([]byte{0x20, 0x04, 0x24, 0x01}),
+	}
+	mrReqBytes, _ := mrReq.Encode()
+	cpf := eip.NewCommonPacketFormat(
+		eip.NewCPFItem(eip.ItemIDNullAddress, nil),
+		eip.NewCPFItem(eip.ItemIDUnconnectedMessage, mrReqBytes),
+	)
+	cpfData, _ := cpf.Encode()
+	rrData := make([]byte, 6+len(cpfData))
+	copy(rrData[6:], cpfData)
+
+	sendEIPPacket(t, clientConn, eip.CommandSendRRData, 0, [8]byte{}, rrData)
+	_, _, status, _, _ := recvEIPPacket(t, clientConn)
+
+	if status != eip.StatusInvalidSessionHandle {
+		t.Fatalf("expected StatusInvalidSessionHandle, got 0x%08X", status)
+	}
+}
+
+// ===========================================================================
+// Client Tracking
+// ===========================================================================
+
+func TestConnectedClients(t *testing.T) {
+	router := cip.NewMessageRouter()
+
+	serverConn, clientConn := net.Pipe()
+	srv := NewServer(router, WithServerConn(serverConn))
+	if err := srv.Start(context.Background(), ""); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Give HandleConn a moment to register the client
+	time.Sleep(50 * time.Millisecond)
+
+	clients := srv.ConnectedClients()
+	if len(clients) != 1 {
+		t.Fatalf("expected 1 client, got %d", len(clients))
+	}
+
+	// Register session and verify it's reflected
+	session := registerSession(t, clientConn)
+	time.Sleep(20 * time.Millisecond)
+
+	clients = srv.ConnectedClients()
+	if len(clients) != 1 {
+		t.Fatalf("expected 1 client, got %d", len(clients))
+	}
+	if clients[0].SessionHandle != session {
+		t.Errorf("session handle = 0x%08X, want 0x%08X", clients[0].SessionHandle, session)
+	}
+
+	// Disconnect
+	clientConn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	clients = srv.ConnectedClients()
+	if len(clients) != 0 {
+		t.Errorf("expected 0 clients after disconnect, got %d", len(clients))
+	}
+}
+
+func TestClientCallbacks(t *testing.T) {
+	router := cip.NewMessageRouter()
+
+	connectCh := make(chan ConnectedClient, 1)
+	disconnectCh := make(chan ConnectedClient, 1)
+
+	serverConn, clientConn := net.Pipe()
+	srv := NewServer(router,
+		WithServerConn(serverConn),
+		WithOnClientConnect(func(c ConnectedClient) {
+			connectCh <- c
+		}),
+		WithOnClientDisconnect(func(c ConnectedClient) {
+			disconnectCh <- c
+		}),
+	)
+	if err := srv.Start(context.Background(), ""); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	select {
+	case <-connectCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for connect callback")
+	}
+
+	clientConn.Close()
+
+	select {
+	case <-disconnectCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for disconnect callback")
+	}
+}
+
+// ===========================================================================
+// MR Decode/Encode Round-Trip
+// ===========================================================================
+
+func TestDecodeMessageRouterRequest(t *testing.T) {
+	original := &cip.MessageRouterRequest{
+		Service:     cip.ServiceReadTag,
+		RequestPath: cip.Path([]byte{0x20, 0x04, 0x24, 0x01}),
+		RequestData: []byte{0x01, 0x00},
+	}
+
+	encoded, err := original.Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	decoded, err := cip.DecodeMessageRouterRequest(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if decoded.Service != original.Service {
+		t.Errorf("service = 0x%02X, want 0x%02X", decoded.Service, original.Service)
+	}
+	if !bytes.Equal(decoded.RequestPath.Bytes(), original.RequestPath.Bytes()) {
+		t.Errorf("path = %X, want %X", decoded.RequestPath.Bytes(), original.RequestPath.Bytes())
+	}
+	if !bytes.Equal(decoded.RequestData, original.RequestData) {
+		t.Errorf("data = %X, want %X", decoded.RequestData, original.RequestData)
+	}
+}
+
+func TestMessageRouterResponseEncode(t *testing.T) {
+	original := &cip.MessageRouterResponse{
+		Service:       cip.ServiceReadTag | 0x80,
+		GeneralStatus: cip.StatusSuccess,
+		ResponseData:  []byte{0xC4, 0x00, 0x2A, 0x00, 0x00, 0x00},
+	}
+
+	encoded, err := original.Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	decoded, err := cip.DecodeMessageRouterResponse(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if decoded.Service != original.Service {
+		t.Errorf("service = 0x%02X, want 0x%02X", decoded.Service, original.Service)
+	}
+	if decoded.GeneralStatus != original.GeneralStatus {
+		t.Errorf("status = 0x%02X, want 0x%02X", decoded.GeneralStatus, original.GeneralStatus)
+	}
+	if !bytes.Equal(decoded.ResponseData, original.ResponseData) {
+		t.Errorf("data = %X, want %X", decoded.ResponseData, original.ResponseData)
+	}
+}
+
+// ===========================================================================
+// Full Client Loopback (real Client through net.Pipe to Server)
+// ===========================================================================
+
+func TestClientServerLoopback(t *testing.T) {
+	router := cip.NewMessageRouter()
+
+	// Register a tag object that handles ReadTag and WriteTag
+	var storedValue int32 = 100
+	tagObj := &mockObject{
+		handleFunc: func(service cip.USINT, path cip.Path, data []byte) ([]byte, error) {
+			switch service {
+			case cip.ServiceReadTag:
+				resp := make([]byte, 6)
+				binary.LittleEndian.PutUint16(resp[0:], uint16(cip.TypeDINT))
+				binary.LittleEndian.PutUint32(resp[2:], uint32(storedValue))
+				return resp, nil
+			case cip.ServiceWriteTag:
+				if len(data) < 8 {
+					return nil, cip.Error{Status: cip.StatusNotEnoughData}
+				}
+				storedValue = int32(binary.LittleEndian.Uint32(data[4:8]))
+				return nil, nil
+			default:
+				return nil, cip.Error{Status: cip.StatusServiceNotSupported}
+			}
+		},
+	}
+	router.RegisterObject(0x04, tagObj)
+
+	serverConn, clientConn := net.Pipe()
+	srv := NewServer(router, WithServerConn(serverConn))
+	if err := srv.Start(context.Background(), ""); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { srv.Stop() })
+
+	// Build a real Client using the pipe connection
+	tc, err := NewTCPConn("", WithConn(clientConn))
+	if err != nil {
+		t.Fatalf("NewTCPConn: %v", err)
+	}
+	t.Cleanup(func() { tc.Close() })
+
+	sess := NewSession(tc, nil)
+	ctx := context.Background()
+	if err := sess.Register(ctx); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// Read initial value (should be 100)
+	readReq := &cip.MessageRouterRequest{
+		Service:     cip.ServiceReadTag,
+		RequestPath: cip.BuildPath(0x04, 1, 0),
+		RequestData: []byte{0x01, 0x00},
+	}
+	resp, err := sess.SendCIPRequest(ctx, readReq)
+	if err != nil {
+		t.Fatalf("ReadTag: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("ReadTag failed: status 0x%02X", resp.GeneralStatus)
+	}
+	if len(resp.ResponseData) < 6 {
+		t.Fatalf("ReadTag response too short: %d bytes", len(resp.ResponseData))
+	}
+	val := int32(binary.LittleEndian.Uint32(resp.ResponseData[2:6]))
+	if val != 100 {
+		t.Errorf("initial value = %d, want 100", val)
+	}
+
+	// Write a new value (42)
+	writeData := make([]byte, 8)
+	binary.LittleEndian.PutUint16(writeData[0:], uint16(cip.TypeDINT))
+	binary.LittleEndian.PutUint16(writeData[2:], 1)
+	binary.LittleEndian.PutUint32(writeData[4:], 42)
+
+	writeReq := &cip.MessageRouterRequest{
+		Service:     cip.ServiceWriteTag,
+		RequestPath: cip.BuildPath(0x04, 1, 0),
+		RequestData: writeData,
+	}
+	resp, err = sess.SendCIPRequest(ctx, writeReq)
+	if err != nil {
+		t.Fatalf("WriteTag: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("WriteTag failed: status 0x%02X", resp.GeneralStatus)
+	}
+
+	// Read back to verify
+	resp, err = sess.SendCIPRequest(ctx, readReq)
+	if err != nil {
+		t.Fatalf("ReadTag after write: %v", err)
+	}
+	if !resp.IsSuccess() {
+		t.Fatalf("ReadTag after write failed: status 0x%02X", resp.GeneralStatus)
+	}
+	val = int32(binary.LittleEndian.Uint32(resp.ResponseData[2:6]))
+	if val != 42 {
+		t.Errorf("value after write = %d, want 42", val)
+	}
+
+	// Unregister
+	sess.Unregister(ctx)
+}
+
 func TestServerWithPipeListener(t *testing.T) {
 	router := cip.NewMessageRouter()
 	router.RegisterObject(0x04, &mockObject{})
@@ -1183,4 +1552,243 @@ func TestServerWithPipeListener(t *testing.T) {
 	if session == 0 {
 		t.Fatal("session handle should not be 0")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// chanListener accepts many pipe connections via a buffered channel.
+// ---------------------------------------------------------------------------
+
+type chanListener struct {
+	ch   chan net.Conn
+	done chan struct{}
+	once sync.Once
+}
+
+func newChanListener(buffer int) *chanListener {
+	return &chanListener{
+		ch:   make(chan net.Conn, buffer),
+		done: make(chan struct{}),
+	}
+}
+
+func (l *chanListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.ch:
+		return c, nil
+	case <-l.done:
+		return nil, &net.OpError{Op: "accept", Net: "pipe", Err: net.ErrClosed}
+	}
+}
+
+func (l *chanListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *chanListener) Addr() net.Addr { return pipeAddr{} }
+
+// ===========================================================================
+// Stress Test: 1 writer + 1000 readers through loopback server
+// ===========================================================================
+
+func TestStressConcurrentClients(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping stress test in short mode")
+	}
+
+	const (
+		numReaders = 1000
+		numWrites  = 20
+		writeDelay = 2 * time.Millisecond
+	)
+
+	// Shared tag value — the writer increments it, readers poll it.
+	var currentValue atomic.Int32
+
+	router := cip.NewMessageRouter()
+	router.RegisterObject(0x04, &mockObject{
+		handleFunc: func(service cip.USINT, path cip.Path, data []byte) ([]byte, error) {
+			switch service {
+			case cip.ServiceReadTag:
+				v := currentValue.Load()
+				resp := make([]byte, 6)
+				binary.LittleEndian.PutUint16(resp[0:], uint16(cip.TypeDINT))
+				binary.LittleEndian.PutUint32(resp[2:], uint32(v))
+				return resp, nil
+			case cip.ServiceWriteTag:
+				if len(data) < 8 {
+					return nil, cip.Error{Status: cip.StatusNotEnoughData}
+				}
+				currentValue.Store(int32(binary.LittleEndian.Uint32(data[4:8])))
+				return nil, nil
+			default:
+				return nil, cip.Error{Status: cip.StatusServiceNotSupported}
+			}
+		},
+	})
+
+	// Listener that accepts many pipe connections.
+	ln := newChanListener(numReaders + 1)
+	srv := NewServer(router, WithServerListener(ln))
+	if err := srv.Start(context.Background(), ""); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	tagPath := cip.BuildPath(0x04, 1, 0)
+	ctx := context.Background()
+
+	// dial creates a pipe pair, hands the server side to the listener,
+	// and returns a registered Session + TCPConn.
+	dial := func() (*Session, *TCPConn) {
+		t.Helper()
+		serverConn, clientConn := net.Pipe()
+		ln.ch <- serverConn
+
+		tc, err := NewTCPConn("", WithConn(clientConn))
+		if err != nil {
+			t.Fatalf("NewTCPConn: %v", err)
+		}
+		sess := NewSession(tc, nil)
+		if err := sess.Register(ctx); err != nil {
+			tc.Close()
+			t.Fatalf("Register: %v", err)
+		}
+		return sess, tc
+	}
+
+	// Connect all clients up front (writer + readers).
+	writerSess, writerTC := dial()
+
+	type readerState struct {
+		sess     *Session
+		tc       *TCPConn
+		lastSeen atomic.Int32
+		reads    atomic.Int32
+	}
+	readers := make([]*readerState, numReaders)
+	for i := range readers {
+		sess, tc := dial()
+		readers[i] = &readerState{sess: sess, tc: tc}
+	}
+
+	// Confirm all clients are connected.
+	clients := srv.ConnectedClients()
+	if len(clients) != numReaders+1 {
+		t.Fatalf("expected %d connected clients, got %d", numReaders+1, len(clients))
+	}
+
+	var wg sync.WaitGroup
+
+	// --- Writer goroutine: write 1, 2, 3, ... numWrites with delays ---
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := int32(1); i <= numWrites; i++ {
+			writeData := make([]byte, 8)
+			binary.LittleEndian.PutUint16(writeData[0:], uint16(cip.TypeDINT))
+			binary.LittleEndian.PutUint16(writeData[2:], 1)
+			binary.LittleEndian.PutUint32(writeData[4:], uint32(i))
+
+			resp, err := writerSess.SendCIPRequest(ctx, &cip.MessageRouterRequest{
+				Service:     cip.ServiceWriteTag,
+				RequestPath: tagPath,
+				RequestData: writeData,
+			})
+			if err != nil {
+				t.Errorf("write %d: %v", i, err)
+				return
+			}
+			if !resp.IsSuccess() {
+				t.Errorf("write %d: CIP status 0x%02X", i, resp.GeneralStatus)
+				return
+			}
+			time.Sleep(writeDelay)
+		}
+	}()
+
+	// --- Reader goroutines: poll until they see the final write ---
+
+	for _, r := range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				resp, err := r.sess.SendCIPRequest(ctx, &cip.MessageRouterRequest{
+					Service:     cip.ServiceReadTag,
+					RequestPath: tagPath,
+					RequestData: []byte{0x01, 0x00},
+				})
+				if err != nil {
+					return // connection closed
+				}
+				if !resp.IsSuccess() || len(resp.ResponseData) < 6 {
+					continue
+				}
+
+				v := int32(binary.LittleEndian.Uint32(resp.ResponseData[2:6]))
+				r.reads.Add(1)
+				if v > r.lastSeen.Load() {
+					r.lastSeen.Store(v)
+				}
+
+				// Stop once we've seen the final written value.
+				if v >= numWrites {
+					return
+				}
+			}
+		}()
+	}
+
+	// --- Wait for all goroutines with timeout ---
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for writer + readers to complete")
+	}
+
+	// --- Verify reader results ---
+
+	for i, r := range readers {
+		if r.reads.Load() == 0 {
+			t.Errorf("reader %d: completed 0 reads", i)
+		}
+		if r.lastSeen.Load() < numWrites {
+			t.Errorf("reader %d: last seen %d, want >= %d", i, r.lastSeen.Load(), numWrites)
+		}
+	}
+
+	// --- Clean shutdown: writer ---
+
+	writerSess.Unregister(ctx)
+	writerTC.Close()
+
+	// --- Clean shutdown: all readers ---
+
+	for _, r := range readers {
+		r.sess.Unregister(ctx)
+		r.tc.Close()
+	}
+
+	// --- Give server time to clean up all HandleConn goroutines ---
+
+	time.Sleep(200 * time.Millisecond)
+
+	// --- Verify server state is clean ---
+
+	clients = srv.ConnectedClients()
+	if len(clients) != 0 {
+		t.Errorf("expected 0 connected clients after shutdown, got %d", len(clients))
+	}
+
+	// --- Server shutdown ---
+
+	srv.Stop()
 }
