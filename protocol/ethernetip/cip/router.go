@@ -19,8 +19,9 @@ type Object interface {
 // maintains a registry of [Object] implementations keyed by class ID and
 // dispatches incoming requests to the appropriate object.
 type MessageRouter struct {
-	mu      sync.RWMutex
-	objects map[UINT]Object // Map of Class ID -> Object
+	mu              sync.RWMutex
+	objects         map[UINT]Object // Map of Class ID -> Object
+	symbolicHandler Object          // Handler for symbolic segment (0x91) requests
 }
 
 // NewMessageRouter creates a new empty MessageRouter with no registered objects.
@@ -36,6 +37,16 @@ func (mr *MessageRouter) RegisterObject(classID UINT, obj Object) {
 	mr.mu.Lock()
 	defer mr.mu.Unlock()
 	mr.objects[classID] = obj
+}
+
+// RegisterSymbolicHandler registers an [Object] to handle requests whose path
+// starts with an ANSI Extended Symbol segment (0x91). This is used for
+// Logix-style tag access where the request path contains a symbolic tag name
+// rather than a class/instance path.
+func (mr *MessageRouter) RegisterSymbolicHandler(obj Object) {
+	mr.mu.Lock()
+	defer mr.mu.Unlock()
+	mr.symbolicHandler = obj
 }
 
 // Dispatch routes a CIP request to the registered object that owns the
@@ -64,6 +75,36 @@ func (mr *MessageRouter) Dispatch(req *MessageRouterRequest) (*MessageRouterResp
 		}
 		classID = UINT(binary.LittleEndian.Uint16(pathBytes[2:4]))
 		remainingPath = Path(pathBytes[4:])
+	case 0x91: // ANSI Extended Symbol segment — route to symbolic handler
+		mr.mu.RLock()
+		handler := mr.symbolicHandler
+		mr.mu.RUnlock()
+
+		if handler == nil {
+			return nil, Error{Status: StatusPathSegmentError}
+		}
+
+		respData, err := handler.HandleRequest(req.Service, req.RequestPath, req.RequestData)
+		if err != nil {
+			if cipErr, ok := err.(Error); ok {
+				return &MessageRouterResponse{
+					Service:       req.Service | 0x80,
+					GeneralStatus: cipErr.Status,
+					ExtStatus:     cipErr.ExtStatus,
+					ExtStatusSize: USINT(len(cipErr.ExtStatus)),
+				}, nil
+			}
+			return &MessageRouterResponse{
+				Service:       req.Service | 0x80,
+				GeneralStatus: StatusServiceNotSupported,
+			}, nil
+		}
+
+		return &MessageRouterResponse{
+			Service:       req.Service | 0x80,
+			GeneralStatus: StatusSuccess,
+			ResponseData:  respData,
+		}, nil
 	default:
 		return nil, Error{Status: StatusPathSegmentError}
 	}
