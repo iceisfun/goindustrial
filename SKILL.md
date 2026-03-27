@@ -29,6 +29,13 @@ SKILLS:
 - CIP data types: BOOL(0xC1), SINT(int8), INT(int16), DINT(int32), LINT(int64), USINT(uint8), UINT(uint16), UDINT(uint32), ULINT(uint64), REAL(float32), LREAL(float64), STRING(0xD0).
 - Error classification: Modbus protocol errors (IsModbusError) are not retried; transport errors trigger Reset + retry. Same pattern for EIP: cipError not retried, transport errors retried.
 - Servers: modbus.NewServer(addr, opts...) and ethernetip.NewServer(router, opts...). Both support net.Pipe injection for testing.
+- EIP server has session management (unique handles, validation), ListIdentity/ListServices, client tracking (ConnectedClients()), connect/disconnect callbacks.
+- Implicit I/O (cyclic messaging): IOScanner (client) sends Forward_Open, exchanges assembly data over UDP at RPI. Adapter (server) wires ConnMgr callbacks to Runtime for automatic I/O connection setup.
+- IOScanner: NewIOScanner(session, udpAddr) -> scanner.Open(ctx, cfg) -> conn.SetOutput(data) / conn.Input() / conn.IsTimedOut() -> scanner.Close(ctx, conn).
+- Adapter pattern: AssemblyObject + Runtime (UDP) + Scheduler (5ms tick) + ConnectionManager with WithOnOpen/WithOnClose callbacks wired to Runtime.AddConnection/RemoveConnection.
+- Monitor subscribers: mon.NewSubscriber(bufferSize) returns Subscriber with buffered channel. sub.All() is iter.Seq[Event] for for-range. sub.Done() to unregister. Never blocks the monitor.
+- plc.Value carries Type (DataType enum) and ByteOrder. Helper methods: val.Bool(), val.Int(), val.Uint(), val.Float32(), val.Float64() decode Raw using the value's byte order.
+- Device probe: examples/ethernetip/probe scans identity, TCP/IP interface, Ethernet link, assembly instances, CIP object classes, connection manager stats, and optionally Logix tags.
 - Optional Lua bindings (lua/ package, requires github.com/iceisfun/golua): industrialLua.Open(v) registers "modbus" and "eip" Lua globals.
 - Lua modbus API: modbus.connect(addr, opts) -> client, client:read_holding_registers(addr, qty), client:write_register(addr, val), etc.
 - Lua eip API: eip.connect(addr, opts) -> client, client:read_tag(name) -> auto-typed value, client:write_tag(name, val), client:list_tags(), etc.
@@ -42,7 +49,9 @@ Most users want one of these:
 1. Read/write Modbus registers or coils from a TCP device.
 2. Read/write tags on a Rockwell Logix PLC over EtherNet/IP.
 3. Monitor data points from either protocol with change detection.
-4. Build a server/simulator for testing.
+4. Establish implicit I/O (cyclic) connections for real-time assembly exchange.
+5. Probe an EtherNet/IP device to discover identity, assemblies, and capabilities.
+6. Build a server/simulator/adapter for testing.
 
 ## Module and Imports
 
@@ -352,6 +361,102 @@ for evt := range m.Events() {
 }
 ```
 
+### Monitor Subscribers (Broadcast Fan-Out)
+
+```go
+sub, err := mon.NewSubscriber(128)
+if err != nil {
+    log.Fatal(err)
+}
+defer sub.Done()
+
+// iter.Seq[Event] — use in for-range
+for evt := range sub.All() {
+    if evt.Err != nil {
+        continue
+    }
+    if evt.Changed {
+        fmt.Printf("%s = %x\n", evt.Snapshot.Point, evt.Snapshot.Value.Raw)
+    }
+}
+```
+
+Multiple subscribers each receive all events (broadcast). Each has its own buffered channel — a slow subscriber never blocks the monitor or others.
+
+## Implicit I/O (Cyclic Messaging)
+
+### IOScanner (Client Side)
+
+```go
+// Use an existing TCP session for Forward_Open/Close
+scanner, err := ethernetip.NewIOScanner(session, ":0") // ephemeral UDP port
+if err != nil {
+    log.Fatal(err)
+}
+
+conn, err := scanner.Open(ctx, ethernetip.IOConnectionConfig{
+    OTConnectionPoint: 2,              // O→T assembly instance on target
+    TOConnectionPoint: 1,              // T→O assembly instance on target
+    OTSize:            12,             // bytes
+    TOSize:            12,             // bytes
+    RPI:               10 * time.Millisecond,
+    TimeoutMultiplier: 3,
+    TargetAddr:        targetUDPAddr,  // target IP:2222
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+// Write output assembly (sent to target each RPI)
+conn.SetOutput([]byte{0x02, 0x00, 0xE8, 0x03, ...})
+
+// Read input assembly (received from target each RPI)
+input := conn.Input()
+age := conn.InputAge()
+
+// Clean shutdown
+scanner.Close(ctx, conn) // sends Forward_Close
+scanner.Shutdown(ctx)
+```
+
+### Adapter (Server Side)
+
+```go
+ao := assembly.NewAssemblyObject()
+ao.RegisterAssembly(100, make([]byte, 12)) // consume
+ao.RegisterAssembly(101, make([]byte, 12)) // produce
+
+rt := runtime.NewRuntime(ao)
+rt.Start(":2222")
+
+sched := runtime.NewScheduler(rt)
+sched.Start()
+
+cm := connmgr.NewConnectionManager(
+    connmgr.WithOnOpen(func(c *connmgr.Connection, req *connmgr.ForwardOpenRequest) {
+        rpi := time.Duration(req.OTRPI) * time.Microsecond
+        rt.AddConnection(&runtime.IOConnection{
+            ConnectionID: c.OTConnectionID, RPI: rpi,
+            Assembly: ao.GetInstance(100), IsConsumer: true,
+        })
+        rt.AddConnection(&runtime.IOConnection{
+            ConnectionID: c.TOConnectionID, RPI: rpi,
+            Assembly: ao.GetInstance(101), IsProducer: true,
+        })
+    }),
+    connmgr.WithOnClose(func(c *connmgr.Connection) {
+        rt.RemoveConnection(c.OTConnectionID)
+        rt.RemoveConnection(c.TOConnectionID)
+    }),
+)
+
+router := cip.NewMessageRouter()
+router.RegisterObject(cip.ClassConnectionMgr, cm)
+
+srv := ethernetip.NewServer(router)
+srv.Start(ctx, ":44818")
+```
+
 ## Modbus Server
 
 ```go
@@ -390,10 +495,23 @@ router.RegisterObject(cip.UINT(0x04), myCustomObject) // implements cip.Object
 
 srv := ethernetip.NewServer(router,
     ethernetip.WithServerLogger(logger),
+    ethernetip.WithIdentity(eip.ListIdentityItem{
+        TypeID: eip.ItemIDListIdentity, EncapsVersion: 1,
+        VendorID: 1, ProductName: "My Device",
+    }),
+    ethernetip.WithOnClientConnect(func(c ethernetip.ConnectedClient) {
+        log.Printf("client connected: %s", c.RemoteAddr)
+    }),
+    ethernetip.WithOnClientDisconnect(func(c ethernetip.ConnectedClient) {
+        log.Printf("client disconnected: %s", c.RemoteAddr)
+    }),
 )
 
 srv.Start(ctx, ":44818")
 defer srv.Stop()
+
+// Query active clients
+clients := srv.ConnectedClients()
 ```
 
 A `cip.Object` must implement:
@@ -570,15 +688,15 @@ end
 
 ## Examples
 
-22 runnable examples under `examples/` covering every operation, each with its own README:
+Runnable examples under `examples/` covering every operation, each with its own README:
 
 **Modbus:** read_registers, write_registers, read_coils, write_coils, read_write_registers, device_identification, server, reconnecting, all_data_types
 
-**EtherNet/IP:** read_tag, write_tag, read_tag_typed, timer_counter, list_tags, list_identity, server, reconnecting
+**EtherNet/IP:** read_tag, write_tag, read_tag_typed, timer_counter, list_tags, list_identity, server, reconnecting, probe, adapter, io_scanner
 
-**Cross-protocol:** monitor_polling, plc_interface
+**Cross-protocol:** monitor_polling, monitor_subscriber, plc_interface
 
-**Lua scripting:** lua/modbus_client, lua/ethernetip_client, lua/monitor_tags
+**Lua scripting:** lua/modbus_client, lua/ethernetip_client, lua/monitor_tags, lua/condition_monitor
 
 Run any example:
 
@@ -603,6 +721,10 @@ Good defaults:
 - Both servers support `WithServerConn(net.Conn)` for deterministic in-process testing with `net.Pipe`.
 - The monitor works with any `plc.Reader` -- you can poll Modbus and EtherNet/IP through the same monitor.
 
+- For implicit I/O, use IOScanner (client) or the adapter pattern (server). The adapter wires ConnMgr callbacks to Runtime — Forward_Open automatically creates I/O connections.
+- plc.Value now carries Type and ByteOrder metadata. Use val.Int(), val.Float32(), etc. instead of manual binary decoding.
+- Monitor subscribers (NewSubscriber) use iter.Seq[Event] for for-range loops. Each subscriber gets all events independently (broadcast).
+- Use the probe example to discover what a device supports before building integrations.
 - For Lua bindings, `industrialLua.Open(v)` registers both `modbus` and `eip` globals. Lua methods use colon syntax (`client:read_tag("name")`); the self parameter is handled automatically.
 - Lua errors from protocol operations are raised via panic and caught by pcall in Lua.
 

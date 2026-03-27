@@ -14,11 +14,11 @@ goindustrial/
     monitor/                     Polling engine with change detection
 
     protocol/modbus/             Modbus TCP client, server, and protocol
-    protocol/ethernetip/         EtherNet/IP client, server, and protocol
+    protocol/ethernetip/         EtherNet/IP client, server, IOScanner, and protocol
     protocol/ethernetip/cip/     Common Industrial Protocol
     protocol/ethernetip/eip/     EIP encapsulation layer
     protocol/ethernetip/objects/ CIP objects (Assembly, Connection Manager)
-    protocol/ethernetip/runtime/ UDP I/O for implicit messaging
+    protocol/ethernetip/runtime/ UDP I/O runtime and scheduler for implicit messaging
 
     lua/                         Optional GoLua bindings (requires github.com/iceisfun/golua)
     examples/                    Runnable examples with READMEs (see below)
@@ -210,7 +210,8 @@ Every example is a standalone `main.go` with its own README explaining the relev
 | [`ethernetip/server`](examples/ethernetip/server/) | CIP message router with custom tag object implementation |
 | [`ethernetip/reconnecting`](examples/ethernetip/reconnecting/) | Manual transport build, CIP vs transport error handling |
 | [`ethernetip/probe`](examples/ethernetip/probe/) | Full device probe: identity, network, assemblies, CIP objects, tags |
-| [`ethernetip/io_scanner`](examples/ethernetip/io_scanner/) | Implicit I/O connection via Forward_Open with cyclic UDP exchange |
+| [`ethernetip/adapter`](examples/ethernetip/adapter/) | Implicit I/O adapter: accepts Forward_Open, cyclic UDP exchange |
+| [`ethernetip/io_scanner`](examples/ethernetip/io_scanner/) | Implicit I/O scanner: sends Forward_Open, cyclic UDP exchange |
 
 ### Cross-Protocol
 
