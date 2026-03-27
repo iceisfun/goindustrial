@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1768,10 +1769,11 @@ func TestModbusErrorHelpers(t *testing.T) {
 		t.Fatal("IsFunctionNotSupportedError should be true")
 	}
 
-	// Test error string contains meaningful info.
+	// Test error string contains meaningful info and a numeric exception code,
+	// not a hex-encoded string name (e.g. "0x06" not "0x53657276657244657669636542757379").
 	errStr := err.Error()
-	if errStr == "" {
-		t.Fatal("error string should not be empty")
+	if !strings.Contains(errStr, "0x6") {
+		t.Fatalf("error string should contain numeric exception code 0x6, got: %s", errStr)
 	}
 }
 
