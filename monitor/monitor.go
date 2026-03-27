@@ -51,6 +51,9 @@ type Monitor struct {
 	events  chan Event
 	closeMx sync.Once
 	wg      sync.WaitGroup
+
+	subscriberMu sync.RWMutex
+	subscribers  map[*Subscriber]struct{}
 }
 
 // NewMonitor creates a monitor bound to the provided reader.
@@ -70,17 +73,62 @@ func NewMonitor(reader plc.Reader, opts ...MonitorOption) (*Monitor, error) {
 	}
 
 	return &Monitor{
-		reader: reader,
-		logger: logger,
-		subs:   make(map[int64]*subscription),
-		stopCh: make(chan struct{}),
-		events: make(chan Event, cfg.eventBuffer),
+		reader:      reader,
+		logger:      logger,
+		subs:        make(map[int64]*subscription),
+		stopCh:      make(chan struct{}),
+		events:      make(chan Event, cfg.eventBuffer),
+		subscribers: make(map[*Subscriber]struct{}),
 	}, nil
 }
 
 // Events exposes the receive-only event stream.
 func (m *Monitor) Events() <-chan Event {
 	return m.events
+}
+
+// NewSubscriber creates a Subscriber that receives all events broadcast by
+// the Monitor. Each Subscriber has its own buffered channel of the given
+// size, so a slow consumer never blocks the monitor or other subscribers.
+// Events are silently dropped when the buffer is full.
+//
+// Call Done when finished to unregister and close the channel:
+//
+//	sub, err := mon.NewSubscriber(128)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer sub.Done()
+//
+//	for evt := range sub.All() {
+//	    fmt.Println(evt.Snapshot.Point, evt.Changed)
+//	}
+func (m *Monitor) NewSubscriber(bufferSize int) (*Subscriber, error) {
+	if bufferSize <= 0 {
+		bufferSize = 64
+	}
+
+	m.subscriberMu.Lock()
+	defer m.subscriberMu.Unlock()
+
+	select {
+	case <-m.stopCh:
+		return nil, ErrMonitorClosed
+	default:
+	}
+
+	s := &Subscriber{
+		ch:      make(chan Event, bufferSize),
+		monitor: m,
+	}
+	m.subscribers[s] = struct{}{}
+	return s, nil
+}
+
+func (m *Monitor) unregisterSubscriber(s *Subscriber) {
+	m.subscriberMu.Lock()
+	delete(m.subscribers, s)
+	m.subscriberMu.Unlock()
 }
 
 // Close stops the monitor and all active subscriptions.
@@ -103,6 +151,13 @@ func (m *Monitor) Close() {
 
 		m.wg.Wait()
 		close(m.events)
+
+		m.subscriberMu.Lock()
+		for sub := range m.subscribers {
+			sub.closeCh()
+		}
+		m.subscribers = make(map[*Subscriber]struct{})
+		m.subscriberMu.Unlock()
 	})
 }
 
@@ -159,6 +214,15 @@ func (m *Monitor) emit(event Event) {
 		return
 	default:
 	}
+
+	m.subscriberMu.RLock()
+	for sub := range m.subscribers {
+		select {
+		case sub.ch <- event:
+		default:
+		}
+	}
+	m.subscriberMu.RUnlock()
 
 	select {
 	case <-m.stopCh:

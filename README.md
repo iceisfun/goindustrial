@@ -215,6 +215,7 @@ Every example is a standalone `main.go` with its own README explaining the relev
 | Example | Description |
 |---------|-------------|
 | [`monitor_polling`](examples/monitor_polling/) | Poll Modbus + EtherNet/IP through a unified Monitor with change detection |
+| [`monitor_subscriber`](examples/monitor_subscriber/) | Broadcast fan-out with buffered Subscribers and iter.Seq for-range |
 | [`plc_interface`](examples/plc_interface/) | Protocol-agnostic code using the `plc.PLC` interface |
 
 ### Lua Scripting
