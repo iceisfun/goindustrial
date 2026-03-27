@@ -209,6 +209,8 @@ Every example is a standalone `main.go` with its own README explaining the relev
 | [`ethernetip/list_identity`](examples/ethernetip/list_identity/) | EIP ListIdentity and ListServices device discovery |
 | [`ethernetip/server`](examples/ethernetip/server/) | CIP message router with custom tag object implementation |
 | [`ethernetip/reconnecting`](examples/ethernetip/reconnecting/) | Manual transport build, CIP vs transport error handling |
+| [`ethernetip/probe`](examples/ethernetip/probe/) | Full device probe: identity, network, assemblies, CIP objects, tags |
+| [`ethernetip/io_scanner`](examples/ethernetip/io_scanner/) | Implicit I/O connection via Forward_Open with cyclic UDP exchange |
 
 ### Cross-Protocol
 

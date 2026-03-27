@@ -1,15 +1,16 @@
-//go:build ignore
-
-// Probe tool for EtherNet/IP devices.
+// Example: ethernetip/probe
 //
-// Queries a device for identity, capabilities, assembly instances, CIP
-// objects, tags, and network configuration. Useful for discovering I/O
-// connection parameters before establishing implicit messaging.
+// Probes an EtherNet/IP device for identity, capabilities, assembly
+// instances, CIP objects, network configuration, and optionally Logix
+// tags. Useful for discovering I/O connection parameters before
+// establishing implicit messaging, or just understanding what a device
+// supports.
 //
 // Usage:
 //
-//	go run probe.go <IP>
-//	go run probe.go <IP> -assemblies=500 -tags
+//	go run . <IP>
+//	go run . <IP> -tags
+//	go run . <IP> -assemblies=500 -timeout=10s
 package main
 
 import (
@@ -34,7 +35,7 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: go run probe.go <PLC_IP> [flags]")
+		fmt.Fprintln(os.Stderr, "Usage: go run . <PLC_IP> [flags]")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
