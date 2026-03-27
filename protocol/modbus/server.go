@@ -314,11 +314,21 @@ func (s *Server) ConnectedClients() []ConnectedClient {
 // It handles both TCP listeners (which support SetDeadline) and non-TCP
 // listeners (e.g., pipe-based) gracefully.
 func (s *Server) acceptLoop(ctx context.Context) {
+	// Capture the listener locally so we never race with Stop() setting
+	// s.listener = nil under s.mutex.
+	s.mutex.RLock()
+	ln := s.listener
+	s.mutex.RUnlock()
+
+	if ln == nil {
+		return
+	}
+
 	// Check if the listener supports deadlines (TCP does, pipe-based does not).
 	type deadliner interface {
 		SetDeadline(t time.Time) error
 	}
-	dl, supportsDeadline := s.listener.(deadliner)
+	dl, supportsDeadline := ln.(deadliner)
 
 	for {
 		select {
@@ -331,7 +341,7 @@ func (s *Server) acceptLoop(ctx context.Context) {
 			dl.SetDeadline(time.Now().Add(time.Second))
 		}
 
-		conn, err := s.listener.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			// Check for timeout (only possible when deadlines are supported).
 			if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {

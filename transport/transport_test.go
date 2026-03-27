@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type mockConn struct {
@@ -221,6 +222,66 @@ func TestReconnectingTransportConcurrency(t *testing.T) {
 	// Only one connection should have been created.
 	if n := counter.Load(); n != 1 {
 		t.Errorf("expected 1 connection, got %d", n)
+	}
+}
+
+// TestReconnectingTransportCloseDuringConnect tests that Close() completes
+// promptly even when a Connect call is in progress. The slow connector
+// blocks until its channel is closed, simulating a long connection attempt.
+func TestReconnectingTransportCloseDuringConnect(t *testing.T) {
+	blockCh := make(chan struct{})
+	slowConnector := ConnectorFunc[*mockConn](func(ctx context.Context) (*mockConn, error) {
+		select {
+		case <-blockCh:
+			return nil, errors.New("connect aborted")
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+
+	rt := NewReconnectingTransport(slowConnector, newMockCloser())
+
+	// Start a Conn() call that will block in Connect.
+	connDone := make(chan error, 1)
+	go func() {
+		_, err := rt.Conn(context.Background())
+		connDone <- err
+	}()
+
+	// Give the goroutine time to enter Connect.
+	time.Sleep(20 * time.Millisecond)
+
+	// Close the transport. This acquires the write lock; the Conn() goroutine
+	// holds the write lock during Connect, so Close will block until Connect
+	// returns. Unblock the connector to let everything proceed.
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- rt.Close()
+	}()
+
+	// Unblock the connector so both Conn() and Close() can proceed.
+	close(blockCh)
+
+	select {
+	case err := <-connDone:
+		// Conn should fail (connect aborted or transport closed).
+		if err == nil {
+			t.Error("expected error from Conn() during close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Conn() did not return within timeout")
+	}
+
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() did not return within timeout")
+	}
+
+	// After close, Conn should return an error.
+	_, err := rt.Conn(context.Background())
+	if err == nil {
+		t.Error("expected error from Conn() after Close()")
 	}
 }
 

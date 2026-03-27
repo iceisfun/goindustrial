@@ -2584,3 +2584,154 @@ func TestAddress117Pattern(t *testing.T) {
 		t.Fatalf("discrete input 117: got 0x%02X, want 0x01", pdu[1])
 	}
 }
+
+// ===========================================================================
+// Cancellation and shutdown tests
+// ===========================================================================
+
+// TestClientContextCanceledDuringRead tests that a canceled context during a
+// read operation returns promptly with a context error. Uses net.Pipe so no
+// data is ever written on the server side, causing the client to block until
+// the context is canceled.
+func TestClientContextCanceledDuringRead(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	conn := NewTCPConn("test", WithConn(clientConn))
+	if err := conn.Connect(context.Background()); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer conn.Disconnect(context.Background())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err := conn.Send(ctx, NewRequest(0, FuncReadHoldingRegisters, makeReadRegistersPDU(0, 1)))
+	if err == nil {
+		t.Fatal("expected error from canceled context")
+	}
+
+	// The error should be a context deadline exceeded or context canceled.
+	if err != context.DeadlineExceeded && err != context.Canceled {
+		// Also accept wrapped errors.
+		if ctx.Err() == nil {
+			t.Fatalf("expected context error, got: %v", err)
+		}
+	}
+}
+
+// TestTransactionTimeout verifies that the transaction pool's timeout monitor
+// cancels transactions that exceed the configured timeout duration.
+func TestTransactionTimeout(t *testing.T) {
+	pool := NewTransactionPool(WithPoolTimeout(100 * time.Millisecond))
+	defer pool.Close()
+
+	req := NewRequest(0, FuncReadHoldingRegisters, makeReadRegistersPDU(0, 1))
+	tx, err := pool.Place(context.Background(), req)
+	if err != nil {
+		t.Fatalf("place: %v", err)
+	}
+
+	// Wait for the timeout monitor to fire. It checks every second, so
+	// be patient but bounded.
+	select {
+	case err := <-tx.ErrCh:
+		if err != ErrTransactionTimeout {
+			t.Fatalf("expected ErrTransactionTimeout, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("transaction was not timed out within expected window")
+	}
+
+	// The transaction should have been removed from the pool.
+	if pool.GetCount() != 0 {
+		t.Fatalf("expected 0 active transactions, got %d", pool.GetCount())
+	}
+}
+
+// TestServerStopDuringAcceptLoop tests that Stop() cleanly shuts down the
+// server while the acceptLoop is running with a pipeListener.
+func TestServerStopDuringAcceptLoop(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	pl := newPipeListener(serverConn)
+	store := NewMemoryStore()
+
+	srv := NewServer("test",
+		WithServerDataStore(store),
+		WithServerListener(pl),
+	)
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+
+	// Give the accept loop time to accept the connection.
+	time.Sleep(50 * time.Millisecond)
+
+	// Stopping should not hang or race.
+	done := make(chan struct{})
+	go func() {
+		srv.Stop(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() did not return within timeout")
+	}
+
+	if srv.IsRunning() {
+		t.Fatal("server should not be running after Stop")
+	}
+}
+
+// TestClientCallbacksOnConnect verifies the OnClientConnect and
+// OnClientDisconnect callbacks fire correctly.
+func TestClientCallbacksOnConnect(t *testing.T) {
+	var connectCalled, disconnectCalled bool
+	var connectMu sync.Mutex
+
+	serverConn, clientConn := net.Pipe()
+
+	srv := NewServer("test",
+		WithServerDataStore(NewMemoryStore()),
+		WithServerConn(serverConn),
+		WithOnClientConnect(func(c ConnectedClient) {
+			connectMu.Lock()
+			connectCalled = true
+			connectMu.Unlock()
+		}),
+		WithOnClientDisconnect(func(c ConnectedClient) {
+			connectMu.Lock()
+			disconnectCalled = true
+			connectMu.Unlock()
+		}),
+	)
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+
+	// Give the connection handler time to start and fire connect callback.
+	time.Sleep(50 * time.Millisecond)
+
+	connectMu.Lock()
+	if !connectCalled {
+		t.Error("OnClientConnect was not called")
+	}
+	connectMu.Unlock()
+
+	// Close client side to trigger disconnect callback.
+	clientConn.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	connectMu.Lock()
+	if !disconnectCalled {
+		t.Error("OnClientDisconnect was not called")
+	}
+	connectMu.Unlock()
+
+	srv.Stop(context.Background())
+}
