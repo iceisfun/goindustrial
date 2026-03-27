@@ -279,7 +279,8 @@ func TestCrossProtocolMonitor(t *testing.T) {
 }
 
 // TestModbusClientPLCInterface verifies the Modbus Client satisfies plc.PLC
-// via its Read method dispatching on DataPoint types.
+// via its Read method dispatching on DataPoint types, and that the returned
+// Values carry correct type metadata.
 func TestModbusClientPLCInterface(t *testing.T) {
 	ctx := context.Background()
 
@@ -312,15 +313,35 @@ func TestModbusClientPLCInterface(t *testing.T) {
 	if len(vals) != 2 {
 		t.Fatalf("expected 2 values, got %d", len(vals))
 	}
-	if len(vals[0].Raw) != 2 {
-		t.Errorf("expected 2 bytes for register, got %d", len(vals[0].Raw))
+
+	// Verify register value using the typed accessor.
+	regVal := vals[0]
+	if regVal.Type != plc.TypeUint16 {
+		t.Errorf("register: expected Type=%s, got %s", plc.TypeUint16, regVal.Type)
 	}
-	if len(vals[1].Raw) != 1 || vals[1].Raw[0] != 1 {
-		t.Errorf("expected coil true [0x01], got %v", vals[1].Raw)
+	if regVal.ByteOrder != plc.ByteOrderBigEndian {
+		t.Errorf("register: expected ByteOrder=%s, got %s", plc.ByteOrderBigEndian, regVal.ByteOrder)
+	}
+	regU, err := regVal.Uint()
+	if err != nil {
+		t.Fatalf("register Uint(): %v", err)
+	}
+	if regU != 100 {
+		t.Errorf("register: expected 100, got %d", regU)
+	}
+
+	// Verify coil value using the typed accessor.
+	coilVal := vals[1]
+	if coilVal.Type != plc.TypeBool {
+		t.Errorf("coil: expected Type=%s, got %s", plc.TypeBool, coilVal.Type)
+	}
+	if !coilVal.Bool() {
+		t.Error("coil: expected true, got false")
 	}
 }
 
-// TestEIPClientPLCInterface verifies the EtherNet/IP path satisfies plc.Reader.
+// TestEIPClientPLCInterface verifies the EtherNet/IP path satisfies plc.Reader
+// and that Values carry CIP type metadata.
 func TestEIPClientPLCInterface(t *testing.T) {
 	ctx := context.Background()
 
@@ -354,12 +375,15 @@ func TestEIPClientPLCInterface(t *testing.T) {
 	if len(vals) != 1 {
 		t.Fatalf("expected 1 value, got %d", len(vals))
 	}
-	if len(vals[0].Raw) >= 6 {
-		val := int32(binary.LittleEndian.Uint32(vals[0].Raw[2:6]))
-		if val != 99 {
-			t.Errorf("expected 99, got %d", val)
-		}
-	} else {
-		t.Errorf("expected at least 6 bytes, got %d", len(vals[0].Raw))
+
+	// The raw response includes a 2-byte CIP type prefix followed by the value.
+	// Verify the value using manual decoding (the multiReader bypasses the
+	// ethernetip.Client, so Type/ByteOrder are not set by the protocol layer).
+	if len(vals[0].Raw) < 6 {
+		t.Fatalf("expected at least 6 bytes, got %d", len(vals[0].Raw))
+	}
+	val := int32(binary.LittleEndian.Uint32(vals[0].Raw[2:6]))
+	if val != 99 {
+		t.Errorf("expected 99, got %d", val)
 	}
 }

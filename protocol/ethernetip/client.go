@@ -127,12 +127,55 @@ func (c *Client) Read(ctx context.Context, points ...plc.DataPoint) ([]plc.Value
 		if err != nil {
 			return nil, err
 		}
-		values = append(values, plc.Value{
+
+		val := plc.Value{
 			DataPoint: dp,
 			Raw:       raw,
-		})
+			ByteOrder: plc.ByteOrderLittleEndian,
+		}
+
+		// The first 2 bytes of a CIP ReadTag response are the type code.
+		// Extract it to set the protocol-agnostic type hint.
+		if len(raw) >= 2 {
+			cipType := cip.DataType(binary.LittleEndian.Uint16(raw[0:2]))
+			val.Type = cipTypeToPlcType(cipType)
+		}
+
+		values = append(values, val)
 	}
 	return values, nil
+}
+
+// cipTypeToPlcType maps CIP data type codes to protocol-agnostic plc.DataType.
+func cipTypeToPlcType(dt cip.DataType) plc.DataType {
+	switch dt {
+	case cip.TypeBOOL:
+		return plc.TypeBool
+	case cip.TypeSINT:
+		return plc.TypeInt16 // SINT is 8-bit but closest hint
+	case cip.TypeINT:
+		return plc.TypeInt16
+	case cip.TypeDINT:
+		return plc.TypeInt32
+	case cip.TypeLINT:
+		return plc.TypeInt64
+	case cip.TypeUSINT:
+		return plc.TypeUint16 // USINT is 8-bit but closest hint
+	case cip.TypeUINT:
+		return plc.TypeUint16
+	case cip.TypeUDINT:
+		return plc.TypeUint32
+	case cip.TypeULINT:
+		return plc.TypeUint64
+	case cip.TypeREAL:
+		return plc.TypeFloat32
+	case cip.TypeLREAL:
+		return plc.TypeFloat64
+	case cip.TypeSTRING, cip.TypeSTRING2, cip.TypeSHORT_STRING:
+		return plc.TypeString
+	default:
+		return plc.TypeBytes
+	}
 }
 
 // Write writes data to a tag on the controller.

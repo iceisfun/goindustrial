@@ -111,14 +111,12 @@ func (c *Client) Read(ctx context.Context, points ...plc.DataPoint) ([]plc.Value
 	results := make([]plc.Value, 0, len(points))
 
 	for _, dp := range points {
-		raw, err := c.readDataPoint(ctx, dp)
+		val, err := c.readDataPoint(ctx, dp)
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, plc.Value{
-			DataPoint: dp,
-			Raw:       raw,
-		})
+		val.DataPoint = dp
+		results = append(results, val)
 	}
 
 	return results, nil
@@ -167,38 +165,62 @@ func (c *Client) Write(ctx context.Context, point plc.DataPoint, data []byte) er
 // readDataPoint
 // ---------------------------------------------------------------------------
 
-func (c *Client) readDataPoint(ctx context.Context, dp plc.DataPoint) ([]byte, error) {
+func (c *Client) readDataPoint(ctx context.Context, dp plc.DataPoint) (plc.Value, error) {
 	switch p := dp.(type) {
 	case HoldingRegister:
 		regs, err := c.ReadHoldingRegisters(ctx, p.Addr, p.Qty)
 		if err != nil {
-			return nil, err
+			return plc.Value{}, err
 		}
-		return registersToBytes(regs), nil
+		dt := plc.TypeUint16
+		if p.Qty > 1 {
+			dt = plc.TypeBytes
+		}
+		return plc.Value{
+			Raw:       registersToBytes(regs),
+			Type:      dt,
+			ByteOrder: plc.ByteOrderBigEndian,
+		}, nil
 
 	case InputRegister:
 		regs, err := c.ReadInputRegisters(ctx, p.Addr, p.Qty)
 		if err != nil {
-			return nil, err
+			return plc.Value{}, err
 		}
-		return registersToBytes(regs), nil
+		dt := plc.TypeUint16
+		if p.Qty > 1 {
+			dt = plc.TypeBytes
+		}
+		return plc.Value{
+			Raw:       registersToBytes(regs),
+			Type:      dt,
+			ByteOrder: plc.ByteOrderBigEndian,
+		}, nil
 
 	case Coil:
 		vals, err := c.ReadCoils(ctx, p.Addr, p.Qty)
 		if err != nil {
-			return nil, err
+			return plc.Value{}, err
 		}
-		return boolsToBytes(vals), nil
+		return plc.Value{
+			Raw:       boolsToBytes(vals),
+			Type:      plc.TypeBool,
+			ByteOrder: plc.ByteOrderBigEndian,
+		}, nil
 
 	case DiscreteInput:
 		vals, err := c.ReadDiscreteInputs(ctx, p.Addr, p.Qty)
 		if err != nil {
-			return nil, err
+			return plc.Value{}, err
 		}
-		return boolsToBytes(vals), nil
+		return plc.Value{
+			Raw:       boolsToBytes(vals),
+			Type:      plc.TypeBool,
+			ByteOrder: plc.ByteOrderBigEndian,
+		}, nil
 
 	default:
-		return nil, fmt.Errorf("modbus read: unsupported data point type %T", dp)
+		return plc.Value{}, fmt.Errorf("modbus read: unsupported data point type %T", dp)
 	}
 }
 
