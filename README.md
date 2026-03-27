@@ -224,6 +224,7 @@ Every example is a standalone `main.go` with its own README explaining the relev
 | [`lua/modbus_client`](examples/lua/modbus_client/) | Read/write Modbus registers from Lua scripts |
 | [`lua/ethernetip_client`](examples/lua/ethernetip_client/) | Read/write EtherNet/IP tags from Lua with tag discovery |
 | [`lua/monitor_tags`](examples/lua/monitor_tags/) | Lua-driven tag polling with change detection |
+| [`lua/condition_monitor`](examples/lua/condition_monitor/) | Compound boolean conditions with per-signal hold times |
 
 Run any example:
 
