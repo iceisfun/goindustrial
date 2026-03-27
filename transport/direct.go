@@ -43,6 +43,8 @@ func NewDirectTransport[C comparable](ctx context.Context, connector Connector[C
 	}, nil
 }
 
+// Conn returns the established connection. It returns an error if the
+// transport has been closed or the connection was previously reset.
 func (d *DirectTransport[C]) Conn(ctx context.Context) (C, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -56,6 +58,9 @@ func (d *DirectTransport[C]) Conn(ctx context.Context) (C, error) {
 	return d.conn, nil
 }
 
+// Reset invalidates the connection if it matches stale, closing the
+// underlying session. Subsequent Conn calls will return an error because
+// DirectTransport does not reconnect.
 func (d *DirectTransport[C]) Reset(stale C) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -75,6 +80,8 @@ func (d *DirectTransport[C]) Reset(stale C) error {
 	return nil
 }
 
+// Close permanently shuts down the transport and closes the underlying
+// connection. It is safe to call multiple times.
 func (d *DirectTransport[C]) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

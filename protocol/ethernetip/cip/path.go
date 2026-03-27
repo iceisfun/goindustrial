@@ -5,7 +5,8 @@ import (
 	"fmt"
 )
 
-// Path Segment Types
+// EPATH segment type identifiers. The high three bits of the first byte of
+// each path segment encode the segment type.
 const (
 	SegmentTypePort      byte = 0x00 // 000xxxxx
 	SegmentTypeLogical   byte = 0x20 // 001xxxxx
@@ -17,7 +18,8 @@ const (
 	SegmentTypeReserved  byte = 0xE0 // 111xxxxx
 )
 
-// Logical Segment Types
+// Logical segment sub-types. These occupy bits 4-2 of a logical segment byte
+// and specify what the segment addresses (class, instance, attribute, etc.).
 const (
 	LogicalTypeClass     byte = 0x00 // 000xxxxx
 	LogicalTypeInstance  byte = 0x04 // 001xxxxx
@@ -29,7 +31,8 @@ const (
 	LogicalTypeExtended  byte = 0x1C // 111xxxxx
 )
 
-// Logical Segment Formats
+// Logical segment format selectors. These occupy bits 1-0 of a logical
+// segment byte and indicate whether the value is 8, 16, or 32 bits wide.
 const (
 	LogicalFormat8Bit     byte = 0x00 // xx00xxxx
 	LogicalFormat16Bit    byte = 0x01 // xx01xxxx
@@ -37,15 +40,18 @@ const (
 	LogicalFormatReserved byte = 0x03 // xx11xxxx
 )
 
-// Path represents a CIP EPATH
+// Path represents a CIP EPATH (Encoded Path). An EPATH is a variable-length
+// byte sequence of typed segments that addresses CIP objects by class,
+// instance, attribute, connection point, or symbolic tag name.
 type Path []byte
 
-// NewPath creates a new empty path
+// NewPath creates a new empty EPATH. Use the Add* methods to append segments.
 func NewPath() Path {
 	return make(Path, 0)
 }
 
-// AddClass adds a Class segment to the path
+// AddClass appends a logical Class segment to the path. Values up to 0xFF use
+// the compact 8-bit format; larger values use the 16-bit format.
 func (p *Path) AddClass(classID UINT) {
 	if classID <= 0xFF {
 		*p = append(*p, SegmentTypeLogical|LogicalTypeClass|LogicalFormat8Bit)
@@ -59,7 +65,7 @@ func (p *Path) AddClass(classID UINT) {
 	}
 }
 
-// AddInstance adds an Instance segment to the path
+// AddInstance appends a logical Instance segment to the path.
 func (p *Path) AddInstance(instanceID UINT) {
 	if instanceID <= 0xFF {
 		*p = append(*p, SegmentTypeLogical|LogicalTypeInstance|LogicalFormat8Bit)
@@ -73,7 +79,8 @@ func (p *Path) AddInstance(instanceID UINT) {
 	}
 }
 
-// AddInstance32 adds a 32-bit Instance segment to the path
+// AddInstance32 appends an Instance segment to the path, automatically
+// choosing 8-bit, 16-bit, or 32-bit encoding based on the value.
 func (p *Path) AddInstance32(instanceID uint32) {
 	if instanceID <= 0xFF {
 		*p = append(*p, SegmentTypeLogical|LogicalTypeInstance|LogicalFormat8Bit)
@@ -93,7 +100,7 @@ func (p *Path) AddInstance32(instanceID uint32) {
 	}
 }
 
-// AddAttribute adds an Attribute segment to the path
+// AddAttribute appends a logical Attribute segment to the path.
 func (p *Path) AddAttribute(attributeID UINT) {
 	if attributeID <= 0xFF {
 		*p = append(*p, SegmentTypeLogical|LogicalTypeAttribute|LogicalFormat8Bit)
@@ -107,7 +114,9 @@ func (p *Path) AddAttribute(attributeID UINT) {
 	}
 }
 
-// AddConnectionPoint adds a Connection Point segment to the path (0x2C/0x2D).
+// AddConnectionPoint appends a logical Connection Point segment (0x2C/0x2D) to
+// the path. Connection points identify assembly instances in Forward_Open
+// requests.
 func (p *Path) AddConnectionPoint(pointID UINT) {
 	if pointID <= 0xFF {
 		*p = append(*p, SegmentTypeLogical|LogicalTypePoint|LogicalFormat8Bit)
@@ -121,7 +130,7 @@ func (p *Path) AddConnectionPoint(pointID UINT) {
 	}
 }
 
-// AddMember adds a Member segment to the path
+// AddMember appends a logical Member segment to the path.
 func (p *Path) AddMember(memberID UINT) {
 	if memberID <= 0xFF {
 		*p = append(*p, SegmentTypeLogical|LogicalTypeMember|LogicalFormat8Bit)
@@ -135,7 +144,9 @@ func (p *Path) AddMember(memberID UINT) {
 	}
 }
 
-// AddSymbolicSegment adds a Symbolic segment (ANSI Extended Symbol)
+// AddSymbolicSegment appends an ANSI Extended Symbol segment to the path. This
+// is the primary mechanism for addressing PLC tags by name (e.g. "Motor_Speed").
+// The segment is automatically padded to a 16-bit word boundary.
 func (p *Path) AddSymbolicSegment(symbol string) {
 	*p = append(*p, 0x91) // Extended Symbol Segment (Data Segment 0x80 | 0x11)
 	l := len(symbol)
@@ -146,7 +157,8 @@ func (p *Path) AddSymbolicSegment(symbol string) {
 	}
 }
 
-// AddPortSegment adds a Port segment
+// AddPortSegment appends a Port segment to the path, used for routing CIP
+// messages through a backplane or network port to a downstream device.
 func (p *Path) AddPortSegment(port UINT, linkAddress []byte) {
 	segStart := len(*p)
 
@@ -184,22 +196,24 @@ func (p *Path) AddPortSegment(port UINT, linkAddress []byte) {
 	}
 }
 
-// Bytes returns the byte slice of the path
+// Bytes returns the raw encoded path bytes.
 func (p Path) Bytes() []byte {
 	return []byte(p)
 }
 
-// Len returns the length in words (16-bit)
+// LenWords returns the path length in 16-bit words, as required by the CIP
+// message router request format.
 func (p Path) LenWords() byte {
 	return byte((len(p) + 1) / 2)
 }
 
-// String returns a string representation of the path
+// String returns a hex-encoded representation of the path bytes.
 func (p Path) String() string {
 	return fmt.Sprintf("%X", []byte(p))
 }
 
-// BuildPath creates a standard Class/Instance/Attribute path
+// BuildPath creates a standard Class/Instance/Attribute EPATH. If attributeID
+// is 0 the attribute segment is omitted.
 func BuildPath(classID, instanceID, attributeID UINT) Path {
 	p := NewPath()
 	p.AddClass(classID)

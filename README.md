@@ -171,7 +171,7 @@ plc:close()
 
 **Modbus TCP** (`protocol/modbus/`)
 - All 11 function codes (read/write coils, registers, device identification)
-- MBAP header framing with 65536-entry transaction pool
+- MBAP header framing with atomic transaction ID allocation
 - `TCPConn` with concurrent read/write goroutines
 - `Server` with `MemoryStore`, handler dispatch, client tracking
 

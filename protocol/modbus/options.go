@@ -11,10 +11,12 @@ import (
 // TCPConn options
 // ---------------------------------------------------------------------------
 
-// TCPConnOption is a functional option for configuring a TCPConn.
+// TCPConnOption is a functional option for configuring a [TCPConn].
+// Pass TCPConnOption values to [NewTCPConn] or [Connect].
 type TCPConnOption func(*TCPConn)
 
-// WithPort sets the TCP port for the connection.
+// WithPort sets the TCP port for the connection. The default is 502, the
+// standard Modbus TCP port.
 func WithPort(port int) TCPConnOption {
 	return func(c *TCPConn) {
 		c.port = port
@@ -47,10 +49,12 @@ func WithConnLogger(logger logging.Logger) TCPConnOption {
 // Client options
 // ---------------------------------------------------------------------------
 
-// ClientOption is a functional option for configuring a Client.
+// ClientOption is a functional option for configuring a [Client].
+// Pass ClientOption values to [NewClient] or [Connect].
 type ClientOption func(*Client)
 
-// WithRetries sets the maximum number of retries for transport errors.
+// WithRetries sets the maximum number of retries for transport-level errors.
+// Protocol-level Modbus exceptions are never retried. The default is 0.
 func WithRetries(retries int) ClientOption {
 	return func(c *Client) {
 		c.retries = retries
@@ -71,7 +75,9 @@ func WithLogger(logger logging.Logger) ClientOption {
 	}
 }
 
-// WithUnitID sets the Modbus unit ID (slave address) for the client.
+// WithUnitID sets the Modbus unit ID (also called slave address) that is placed
+// in the MBAP header of every request. The unit ID identifies the target device
+// on multi-drop networks. The default is 0.
 func WithUnitID(unitID UnitID) ClientOption {
 	return func(c *Client) {
 		c.unitID = unitID

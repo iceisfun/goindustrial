@@ -6,13 +6,15 @@ import (
 	"fmt"
 )
 
-// Marshaler is the interface implemented by types that can marshal
-// themselves into a CIP binary description.
+// Marshaler is the interface implemented by types that can marshal themselves
+// into CIP binary format. Types that implement Marshaler take priority over
+// the default binary.Write encoding in [Marshal].
 type Marshaler interface {
 	MarshalCIP() ([]byte, error)
 }
 
-// Marshal returns the CIP encoding of v.
+// Marshal returns the little-endian CIP encoding of v. If v implements
+// [Marshaler] its MarshalCIP method is called; otherwise binary.Write is used.
 func Marshal(v any) ([]byte, error) {
 	// 1. Check if v implements Marshaler
 	if m, ok := v.(Marshaler); ok {
@@ -28,7 +30,9 @@ func Marshal(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// GoTypeToCIPType maps a Go type to a CIP Data Type.
+// GoTypeToCIPType maps a Go value's type to the corresponding CIP [DataType]
+// code. It supports bool, all signed/unsigned integer sizes, float32, float64,
+// and string.
 func GoTypeToCIPType(v any) (DataType, error) {
 	switch v.(type) {
 	case bool:

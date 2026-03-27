@@ -11,7 +11,10 @@ import (
 	"time"
 )
 
-// DefaultLogger is a structured logger that writes formatted messages to an io.Writer.
+// DefaultLogger is a structured [Logger] implementation that writes
+// timestamped, level-prefixed messages to an [io.Writer]. It also implements
+// [HexdumpLogger] for protocol-level wire diagnostics. Create one with
+// [NewDefaultLogger].
 type DefaultLogger struct {
 	mu     sync.Mutex
 	level  Level
@@ -60,36 +63,43 @@ func NewDefaultLogger(options ...Option) *DefaultLogger {
 	return logger
 }
 
+// Trace logs a message at LevelTrace.
 func (l *DefaultLogger) Trace(ctx context.Context, format string, args ...any) {
 	if l.level <= LevelTrace {
 		l.log("TRACE", format, args...)
 	}
 }
 
+// Debug logs a message at LevelDebug.
 func (l *DefaultLogger) Debug(ctx context.Context, format string, args ...any) {
 	if l.level <= LevelDebug {
 		l.log("DEBUG", format, args...)
 	}
 }
 
+// Info logs a message at LevelInfo.
 func (l *DefaultLogger) Info(ctx context.Context, format string, args ...any) {
 	if l.level <= LevelInfo {
 		l.log("INFO", format, args...)
 	}
 }
 
+// Warn logs a message at LevelWarn.
 func (l *DefaultLogger) Warn(ctx context.Context, format string, args ...any) {
 	if l.level <= LevelWarn {
 		l.log("WARN", format, args...)
 	}
 }
 
+// Error logs a message at LevelError.
 func (l *DefaultLogger) Error(ctx context.Context, format string, args ...any) {
 	if l.level <= LevelError {
 		l.log("ERROR", format, args...)
 	}
 }
 
+// WithFields returns a new DefaultLogger that includes the given fields in
+// every log entry, merged with any fields from the parent logger.
 func (l *DefaultLogger) WithFields(fields map[string]any) Logger {
 	return NewDefaultLogger(
 		WithLevel(l.level),
@@ -99,12 +109,14 @@ func (l *DefaultLogger) WithFields(fields map[string]any) Logger {
 	)
 }
 
+// GetLevel returns the current minimum log level.
 func (l *DefaultLogger) GetLevel() Level {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.level
 }
 
+// SetLevel changes the minimum log level at runtime.
 func (l *DefaultLogger) SetLevel(level Level) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

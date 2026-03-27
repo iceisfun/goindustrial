@@ -15,7 +15,7 @@ type connConfig struct {
 	dialTimeout time.Duration
 }
 
-// ConnOption configures a TCPConn.
+// ConnOption configures a [TCPConn] created by [NewTCPConn].
 type ConnOption func(*connConfig)
 
 // WithConn injects a pre-existing net.Conn, bypassing the TCP dial.
@@ -36,11 +36,13 @@ func WithDialTimeout(d time.Duration) ConnOption {
 
 // ---------- ClientOption ----------
 
-// ClientOption configures a Client.
+// ClientOption configures a [Client] created by [NewClient], [Connect], or
+// [NewReconnectingClient].
 type ClientOption func(*Client)
 
-// WithRetries sets the number of retries for operations.
-// 0 means no retries (fail immediately), -1 means infinite retries.
+// WithRetries sets the maximum number of retry attempts for failed operations.
+// A value of 0 means no retries (fail immediately), and -1 means infinite
+// retries.
 func WithRetries(n int) ClientOption {
 	return func(c *Client) {
 		c.retries = n
@@ -54,7 +56,8 @@ func WithRetryDelay(d time.Duration) ClientOption {
 	}
 }
 
-// WithLogger overrides the logger on the client.
+// WithLogger sets the logger used by the client for diagnostic output. If l
+// is nil the call is a no-op.
 func WithLogger(l logging.Logger) ClientOption {
 	return func(c *Client) {
 		if l != nil {

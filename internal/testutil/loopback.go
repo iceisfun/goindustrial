@@ -1,3 +1,5 @@
+// Package testutil provides lightweight helpers for tests in the goindustrial
+// module, such as free-port discovery and a mock logger.
 package testutil
 
 import (

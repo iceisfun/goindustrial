@@ -14,14 +14,17 @@ import (
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/eip"
 )
 
-// ConnectedClient describes an active EIP connection.
+// ConnectedClient describes an active EtherNet/IP client connection as seen by
+// the [Server].
 type ConnectedClient struct {
 	RemoteAddr    string
 	SessionHandle uint32
 	ConnectedAt   time.Time
 }
 
-// Server implements an EtherNet/IP Server (Adapter).
+// Server implements an EtherNet/IP adapter (target). It listens for TCP
+// connections, handles session registration, and dispatches incoming CIP
+// requests (SendRRData, SendUnitData) through a [cip.MessageRouter].
 type Server struct {
 	router       *cip.MessageRouter
 	logger       logging.Logger
@@ -52,7 +55,7 @@ type connState struct {
 	connectedAt   time.Time
 }
 
-// ServerOption configures a Server.
+// ServerOption configures a [Server] created by [NewServer].
 type ServerOption func(*Server)
 
 // WithServerListener injects a pre-created net.Listener.
@@ -77,7 +80,8 @@ func WithServerConn(conn net.Conn) ServerOption {
 	}
 }
 
-// WithIdentity configures the device identity returned by ListIdentity.
+// WithIdentity configures the device identity item returned in response to
+// the EIP ListIdentity command.
 func WithIdentity(id eip.ListIdentityItem) ServerOption {
 	return func(s *Server) {
 		s.identity = id
@@ -107,7 +111,9 @@ func WithOnClientDisconnect(fn func(ConnectedClient)) ServerOption {
 	}
 }
 
-// NewServer creates a new Server backed by the given message router.
+// NewServer creates a new Server that dispatches CIP requests through the
+// given [cip.MessageRouter]. Apply [ServerOption] values to configure the
+// listener, logger, identity, and connection callbacks.
 func NewServer(router *cip.MessageRouter, opts ...ServerOption) *Server {
 	s := &Server{
 		router:  router,
@@ -125,9 +131,10 @@ func NewServer(router *cip.MessageRouter, opts ...ServerOption) *Server {
 	return s
 }
 
-// Start starts the server. If WithServerConn was used, it handles that single
-// connection in a goroutine and returns. If WithServerListener was used, it
-// uses that listener. Otherwise it creates a TCP listener on the given address.
+// Start begins accepting connections. If [WithServerConn] was used, it handles
+// that single connection in a goroutine and returns immediately. If
+// [WithServerListener] was used, it uses that listener. Otherwise it creates a
+// TCP listener bound to the given address.
 func (s *Server) Start(ctx context.Context, address string) error {
 	s.done = make(chan struct{})
 
@@ -181,7 +188,8 @@ func (s *Server) Stop() error {
 	return firstErr
 }
 
-// ConnectedClients returns a snapshot of all active client connections.
+// ConnectedClients returns a snapshot of all currently active client
+// connections. The returned slice is safe to use without holding any lock.
 func (s *Server) ConnectedClients() []ConnectedClient {
 	s.clientsMu.RLock()
 	defer s.clientsMu.RUnlock()
@@ -226,8 +234,9 @@ func (s *Server) acceptLoop() {
 	}
 }
 
-// HandleConn handles a single EIP connection. It is exported so tests can call
-// it directly with one end of a net.Pipe.
+// HandleConn handles a single EtherNet/IP TCP connection, processing
+// encapsulation commands until the peer disconnects or the server is stopped.
+// It is exported so tests can call it directly with one end of a net.Pipe.
 func (s *Server) HandleConn(conn net.Conn) {
 	defer conn.Close()
 

@@ -15,30 +15,51 @@ import (
 // ErrMonitorClosed is returned when an operation targets a stopped Monitor.
 var ErrMonitorClosed = errors.New("monitor is closed")
 
-// Snapshot holds the latest value of a monitored data point.
+// Snapshot holds the latest value of a monitored data point along with the
+// time it was read from the PLC.
 type Snapshot struct {
-	Point     plc.DataPoint
-	Value     plc.Value
+	// Point is the data point that was read.
+	Point plc.DataPoint
+	// Value is the most recently read value. It may be zero-valued when the
+	// read failed (check the corresponding Event.Err).
+	Value plc.Value
+	// Timestamp is the wall-clock time just before the read was issued.
 	Timestamp time.Time
 }
 
-// Event is emitted by the monitor on each poll cycle.
+// Event is emitted by the monitor on each poll cycle. It carries the read
+// result and metadata about whether the value changed since the previous poll.
 type Event struct {
+	// SubscriptionID identifies which subscription produced this event.
 	SubscriptionID int64
-	Snapshot       Snapshot
-	Err            error
-	Changed        bool
+	// Snapshot contains the data point, value, and timestamp for this read.
+	Snapshot Snapshot
+	// Err is non-nil when the read failed. When set, Snapshot.Value is
+	// zero-valued and Changed is false.
+	Err error
+	// Changed indicates whether the value differs from the previous poll.
+	// It is always true when no ChangeDetector is configured or on the
+	// first successful read.
+	Changed bool
 }
 
-// ChangeDetector determines if a value has changed between two snapshots.
+// ChangeDetector determines whether a PLC value has changed between two
+// successive polls. Implementations should return true when the values differ.
+// See [ByteChangeDetector] for a simple raw-bytes comparison.
 type ChangeDetector interface {
+	// Detect reports whether curr represents a changed value relative to prev.
 	Detect(prev, curr Snapshot) bool
 }
 
-// Handler is called after a successful poll.
+// Handler is a callback invoked after each successful poll with the latest
+// snapshot. Handlers run synchronously in the subscription goroutine, so they
+// should return quickly to avoid delaying subsequent polls.
 type Handler func(Snapshot)
 
-// Monitor polls data points on a schedule and emits events.
+// Monitor polls PLC data points on a configurable schedule and broadcasts
+// [Event] values to subscribers. Create one with [NewMonitor], register data
+// points with [Monitor.Subscribe], and consume results via [Monitor.Events]
+// or [Monitor.NewSubscriber].
 type Monitor struct {
 	reader plc.Reader
 	logger logging.Logger
@@ -61,7 +82,10 @@ type Monitor struct {
 	subscribers  map[*Subscriber]struct{}
 }
 
-// NewMonitor creates a monitor bound to the provided reader.
+// NewMonitor creates a Monitor that reads PLC data through the given
+// [plc.Reader]. Use [MonitorOption] values to configure logging and buffer
+// sizes. To enable read clustering, wrap the reader in a [ClusteringReader]
+// before passing it here.
 func NewMonitor(reader plc.Reader, opts ...MonitorOption) (*Monitor, error) {
 	if reader == nil {
 		return nil, errors.New("monitor requires a reader")
@@ -91,7 +115,9 @@ func NewMonitor(reader plc.Reader, opts ...MonitorOption) (*Monitor, error) {
 	}, nil
 }
 
-// Events exposes the receive-only event stream.
+// Events returns a receive-only channel that carries every [Event] produced by
+// the monitor. The channel is closed when [Monitor.Close] is called. For
+// independent buffering per consumer, use [Monitor.NewSubscriber] instead.
 func (m *Monitor) Events() <-chan Event {
 	return m.events
 }
@@ -140,7 +166,9 @@ func (m *Monitor) unregisterSubscriber(s *Subscriber) {
 	m.subscriberMu.Unlock()
 }
 
-// Close stops the monitor and all active subscriptions.
+// Close stops the monitor, cancels all active subscriptions, waits for their
+// goroutines to finish, and closes the event channel. It is safe to call
+// multiple times.
 func (m *Monitor) Close() {
 	m.closeMx.Do(func() {
 		m.cancel()
@@ -171,8 +199,10 @@ func (m *Monitor) Close() {
 	})
 }
 
-// Subscribe registers a data point to poll. Returns a Subscription handle
-// that can be used to stop polling for this specific point.
+// Subscribe registers a data point for periodic polling and returns a
+// [Subscription] handle. Use [SubscriptionOption] values to control the poll
+// frequency, attach a [ChangeDetector], or register a [Handler] callback.
+// Call [Subscription.Stop] to cancel polling for this specific point.
 func (m *Monitor) Subscribe(point plc.DataPoint, opts ...SubscriptionOption) (*Subscription, error) {
 	if point == nil {
 		return nil, errors.New("data point is required")
@@ -250,7 +280,9 @@ func (m *Monitor) emit(event Event) {
 	}
 }
 
-// Subscription represents a running polling routine.
+// Subscription represents a running polling routine for a single data point.
+// Call [Subscription.Stop] to cancel it. A Subscription is safe for concurrent
+// use; Stop may be called from any goroutine.
 type Subscription struct {
 	monitor *Monitor
 	id      int64
@@ -260,7 +292,9 @@ type Subscription struct {
 // ID returns the subscription identifier used in events.
 func (s *Subscription) ID() int64 { return s.id }
 
-// Stop cancels the subscription.
+// Stop cancels the subscription and removes it from the monitor. If the
+// reader implements [Registrar], the data point is unregistered as well.
+// Safe to call multiple times.
 func (s *Subscription) Stop() {
 	if s.monitor == nil {
 		return

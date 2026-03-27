@@ -6,10 +6,11 @@ import (
 	"fmt"
 )
 
-// Command represents an EIP encapsulation command
+// Command represents an EtherNet/IP encapsulation command code. Commands
+// identify the type of message carried in an [EncapsulationHeader].
 type Command uint16
 
-// Encapsulation Commands
+// EtherNet/IP encapsulation command codes.
 const (
 	CommandNop               Command = 0x0000
 	CommandListServices      Command = 0x0004
@@ -23,7 +24,7 @@ const (
 	CommandCancel            Command = 0x0073
 )
 
-// String returns the string representation of the command
+// String returns a human-readable name for the command.
 func (c Command) String() string {
 	switch c {
 	case CommandNop:
@@ -51,7 +52,8 @@ func (c Command) String() string {
 	}
 }
 
-// Status Codes
+// EtherNet/IP encapsulation status codes returned in the
+// [EncapsulationHeader.Status] field.
 const (
 	StatusSuccess              uint32 = 0x00000000
 	StatusInvalidCommand       uint32 = 0x00000001
@@ -62,13 +64,15 @@ const (
 	StatusUnsupportedProtocol  uint32 = 0x00000069
 )
 
-// RegisterSessionData represents the data for Register Session command
+// RegisterSessionData represents the payload of a RegisterSession command,
+// which initiates a session between a client and an EtherNet/IP device.
 type RegisterSessionData struct {
 	ProtocolVersion uint16
 	OptionsFlags    uint16
 }
 
-// NewRegisterSessionData creates a default RegisterSessionData
+// NewRegisterSessionData creates a RegisterSessionData with protocol version 1
+// and no option flags.
 func NewRegisterSessionData() *RegisterSessionData {
 	return &RegisterSessionData{
 		ProtocolVersion: 1,
@@ -76,7 +80,7 @@ func NewRegisterSessionData() *RegisterSessionData {
 	}
 }
 
-// Encode encodes the RegisterSessionData
+// Encode serializes the RegisterSessionData into its wire format.
 func (d *RegisterSessionData) Encode() ([]byte, error) {
 	buf := new(bytes.Buffer)
 	if err := binary.Write(buf, binary.LittleEndian, d); err != nil {

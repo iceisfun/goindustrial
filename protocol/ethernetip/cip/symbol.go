@@ -6,23 +6,26 @@ import (
 	"io"
 )
 
-// Symbol Object Class ID
+// ClassSymbol is the CIP class ID for the Symbol Object (0x6B), used to
+// enumerate tags on Rockwell Logix controllers.
 const ClassSymbol UINT = 0x6B
 
-// Symbol Instance Structure (partial, for listing)
+// SymbolInstance represents a single tag entry discovered by enumerating the
+// Symbol Object class. It contains the instance ID, the tag name, and the CIP
+// data type code.
 type SymbolInstance struct {
 	InstanceID uint32
 	Name       string
 	Type       DataType
 }
 
-// GetInstanceAttributeListRequest creates a request to list instances of a class
-// This uses the "Get Instance Attribute List" service (0x55) if supported,
-// or we might have to iterate using "Find Next Object Instance" (0x11).
-// Logix controllers typically support iterating via GetInstanceAttributeList on the Symbol Class.
+// ServiceGetInstanceAttributeList is the CIP Get_Instance_Attribute_List
+// service code (0x55).
 const ServiceGetInstanceAttributeList USINT = 0x55
 
-// NewGetSymbolClassAttributesRequest creates a request to get attributes of the Symbol Class (Instance 0)
+// NewGetSymbolClassAttributesRequest creates a Get_Attribute_List request
+// targeting the Symbol Class object (instance 0) to retrieve the class
+// revision and maximum instance ID.
 func NewGetSymbolClassAttributesRequest() *MessageRouterRequest {
 	p := NewPath()
 	p.AddClass(ClassSymbol)
@@ -40,7 +43,9 @@ func NewGetSymbolClassAttributesRequest() *MessageRouterRequest {
 	}
 }
 
-// DecodeSymbolClassAttributesResponse decodes the response from GetAttributeList on Class 0x6B
+// DecodeSymbolClassAttributesResponse decodes the Get_Attribute_List response
+// from the Symbol Class (0x6B, instance 0) and returns the class revision and
+// the maximum instance ID.
 func DecodeSymbolClassAttributesResponse(data []byte) (uint16, uint16, error) {
 	r := bytes.NewReader(data)
 	var count uint16
@@ -77,7 +82,8 @@ func DecodeSymbolClassAttributesResponse(data []byte) (uint16, uint16, error) {
 	return revision, maxInstance, nil
 }
 
-// NewGetSymbolAttributesRequest creates a request to get attributes for a specific symbol instance
+// NewGetSymbolAttributesRequest creates a Get_Attribute_List request targeting
+// a specific Symbol Object instance to retrieve its name and data type.
 func NewGetSymbolAttributesRequest(instanceID uint32) *MessageRouterRequest {
 	p := NewPath()
 	p.AddClass(ClassSymbol)
@@ -95,7 +101,8 @@ func NewGetSymbolAttributesRequest(instanceID uint32) *MessageRouterRequest {
 	}
 }
 
-// DecodeSymbolAttributesResponse decodes the response from GetAttributeList (0x03)
+// DecodeSymbolAttributesResponse decodes the Get_Attribute_List response for a
+// Symbol Object instance and returns the tag name and CIP data type code.
 func DecodeSymbolAttributesResponse(data []byte) (string, DataType, error) {
 	r := bytes.NewReader(data)
 	var count uint16

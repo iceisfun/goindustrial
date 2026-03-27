@@ -10,7 +10,11 @@ import (
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/eip"
 )
 
-// Session represents an EIP session over a TCP connection.
+// Session represents a registered EtherNet/IP session over a TCP connection.
+// A session is established by sending a RegisterSession command, which returns
+// a session handle used to identify all subsequent requests. Use [NewSession]
+// and [Session.Register] to create one, or let [SessionConnector] do it
+// automatically.
 type Session struct {
 	conn   *TCPConn
 	handle eip.SessionHandle
@@ -18,8 +22,9 @@ type Session struct {
 	mu     sync.Mutex // protects handle
 }
 
-// NewSession creates a new session on top of the given TCPConn.
-// If logger is nil, a NopLogger is used.
+// NewSession creates a new unregistered Session on top of the given [TCPConn].
+// Call [Session.Register] to obtain a session handle from the remote device.
+// If logger is nil a no-op logger is used.
 func NewSession(conn *TCPConn, logger logging.Logger) *Session {
 	if logger == nil {
 		logger = logging.NewNopLogger()
@@ -30,7 +35,8 @@ func NewSession(conn *TCPConn, logger logging.Logger) *Session {
 	}
 }
 
-// Register sends the RegisterSession command and stores the session handle.
+// Register sends the EIP RegisterSession command and stores the returned
+// session handle for use in all subsequent requests on this session.
 func (s *Session) Register(ctx context.Context) error {
 	regData := eip.NewRegisterSessionData()
 	data, err := regData.Encode()
@@ -60,7 +66,8 @@ func (s *Session) Register(ctx context.Context) error {
 	return nil
 }
 
-// Unregister sends the UnregisterSession command.
+// Unregister sends the EIP UnregisterSession command to release the session
+// handle on the remote device.
 func (s *Session) Unregister(ctx context.Context) error {
 	s.mu.Lock()
 	handle := s.handle
@@ -74,8 +81,11 @@ func (s *Session) Close() error {
 	return s.conn.Close()
 }
 
-// SendRRData sends a Request/Response Data packet (unconnected message) and
-// returns the unconnected message data from the response.
+// SendRRData sends a SendRRData (Request/Response Data) command carrying an
+// unconnected CIP message. The request bytes are wrapped in a Common Packet
+// Format (CPF) envelope with a Null Address item and an Unconnected Message
+// item. The returned bytes are the Unconnected Message data extracted from the
+// response CPF.
 func (s *Session) SendRRData(ctx context.Context, request []byte) ([]byte, error) {
 	// Construct CPF:
 	//   Item 0: Null Address (0x0000) - Length 0
@@ -133,8 +143,8 @@ func (s *Session) SendRRData(ctx context.Context, request []byte) ([]byte, error
 	return item.Data, nil
 }
 
-// SendCIPRequest sends a CIP message router request via SendRRData and decodes
-// the CIP response.
+// SendCIPRequest encodes a [cip.MessageRouterRequest], sends it via
+// [Session.SendRRData], and decodes the CIP message router response.
 func (s *Session) SendCIPRequest(ctx context.Context, req *cip.MessageRouterRequest) (*cip.MessageRouterResponse, error) {
 	reqBytes, err := req.Encode()
 	if err != nil {
@@ -153,7 +163,8 @@ func (s *Session) SendCIPRequest(ctx context.Context, req *cip.MessageRouterRequ
 	return cip.DecodeMessageRouterResponse(respBytes)
 }
 
-// ListIdentity sends the ListIdentity command and returns the identity items.
+// ListIdentity sends the EIP ListIdentity command and returns the identity
+// items reported by the remote device.
 func (s *Session) ListIdentity(ctx context.Context) ([]eip.ListIdentityItem, error) {
 	s.logger.Info(ctx, "Sending ListIdentity command")
 	if err := s.conn.Send(eip.CommandListIdentity, nil, 0); err != nil {
@@ -173,7 +184,8 @@ func (s *Session) ListIdentity(ctx context.Context) ([]eip.ListIdentityItem, err
 	return eip.DecodeListIdentityResponse(respData)
 }
 
-// ListServices sends the ListServices command and returns the service items.
+// ListServices sends the EIP ListServices command and returns the service
+// items describing the communication capabilities of the remote device.
 func (s *Session) ListServices(ctx context.Context) ([]eip.ListServicesItem, error) {
 	s.logger.Info(ctx, "Sending ListServices command")
 	if err := s.conn.Send(eip.CommandListServices, nil, 0); err != nil {

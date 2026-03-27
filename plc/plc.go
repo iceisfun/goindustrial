@@ -1,3 +1,12 @@
+// Package plc defines protocol-agnostic abstractions for communicating with
+// industrial programmable logic controllers (PLCs). It provides the [PLC]
+// interface for reading and writing data points, along with a [Value] type
+// that carries raw bytes with type and byte-order metadata so callers can
+// interpret responses without depending on a specific protocol.
+//
+// Protocol implementations (Modbus TCP, EtherNet/IP CIP) satisfy these
+// interfaces while providing their own concrete [DataPoint] types that encode
+// protocol-native addressing such as register numbers or tag names.
 package plc
 
 import (
@@ -253,23 +262,41 @@ func (v Value) byteOrder() binary.ByteOrder {
 	}
 }
 
-// Reader can read data points from a controller.
+// Reader reads data points from a controller. Implementations perform one or
+// more protocol transactions and return a Value for each requested DataPoint
+// in the same order.
 type Reader interface {
+	// Read retrieves the current values of the given data points from the
+	// controller. The returned slice has one Value per input DataPoint, in
+	// the same order. The context may be used for cancellation or deadlines.
 	Read(ctx context.Context, points ...DataPoint) ([]Value, error)
 }
 
-// Writer can write data points to a controller.
+// Writer writes data to a controller. Implementations encode the raw bytes
+// according to the protocol and address specified by the DataPoint.
 type Writer interface {
+	// Write sends data to the specified data point on the controller.
+	// The caller is responsible for encoding data in the byte order
+	// expected by the target protocol.
 	Write(ctx context.Context, point DataPoint, data []byte) error
 }
 
-// PLC represents a connection to an industrial controller.
-// For protocol-specific features (e.g., Modbus ReadCoils, EtherNet/IP ListTags),
-// use the concrete protocol client types directly.
+// PLC represents a connection to an industrial controller that can be opened,
+// closed, and used for reading and writing data points. It embeds [Reader]
+// and [Writer] for data access.
+//
+// For protocol-specific features (e.g., Modbus ReadCoils, EtherNet/IP
+// ListTags), use the concrete protocol client types directly.
 type PLC interface {
 	Reader
 	Writer
+
+	// Connect establishes the underlying protocol session with the controller.
 	Connect(ctx context.Context) error
+
+	// Disconnect gracefully tears down the protocol session.
 	Disconnect(ctx context.Context) error
+
+	// IsConnected reports whether the connection is currently active.
 	IsConnected() bool
 }

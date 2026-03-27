@@ -5,27 +5,33 @@ import (
 	"sync"
 )
 
-// Object is an interface that CIP objects must implement to handle requests
+// Object is the interface that CIP objects must implement to receive service
+// requests dispatched by the [MessageRouter].
 type Object interface {
-	// HandleRequest dispatches a service request to the object
-	// It returns the response data or an error
+	// HandleRequest processes a CIP service request addressed to this object.
+	// path contains the remaining EPATH segments after the class segment
+	// (typically instance and attribute). It returns the response data or an
+	// error.
 	HandleRequest(service USINT, path Path, data []byte) ([]byte, error)
 }
 
-// MessageRouter implements the Message Router Object (Class 0x02)
+// MessageRouter implements the CIP Message Router Object (class 0x02). It
+// maintains a registry of [Object] implementations keyed by class ID and
+// dispatches incoming requests to the appropriate object.
 type MessageRouter struct {
 	mu      sync.RWMutex
 	objects map[UINT]Object // Map of Class ID -> Object
 }
 
-// NewMessageRouter creates a new Message Router
+// NewMessageRouter creates a new empty MessageRouter with no registered objects.
 func NewMessageRouter() *MessageRouter {
 	return &MessageRouter{
 		objects: make(map[UINT]Object),
 	}
 }
 
-// RegisterObject registers a CIP object with the router
+// RegisterObject registers a CIP [Object] implementation with the router under
+// the given class ID.
 func (mr *MessageRouter) RegisterObject(classID UINT, obj Object) {
 	mr.mu.Lock()
 	defer mr.mu.Unlock()

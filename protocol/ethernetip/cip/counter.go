@@ -6,16 +6,17 @@ import (
 	"fmt"
 )
 
-// Counter represents a Rockwell Logix Counter structure (CTU, CTD).
+// Counter represents a Rockwell Logix counter structure (CTU, CTD, CTUD).
+// Rockwell counters are vendor-specific 14-byte structures stored in PLC memory.
 //
-// Memory Layout (similar to Timer):
-// Offset 0-1: Reserved (INT) - often ignored or part of the previous word alignment
-// Offset 2-5: Status Bits (DINT) - CU, CD, DN, OV, UN packed here
-// Offset 6-9: PRE (DINT)
-// Offset 10-13: ACC (DINT)
+// The wire layout is:
 //
-// Total size is typically 12-14 bytes depending on alignment/packing.
-// We expect at least 12 bytes if just raw DINTs, but typically 14 bytes with the initial 2-byte pad/reserved.
+//	Offset 0-1:   Reserved (INT)
+//	Offset 2-5:   Status bits (DINT) -- CU, CD, DN, OV, UN packed in the high bits
+//	Offset 6-9:   PRE (DINT) -- preset value
+//	Offset 10-13: ACC (DINT) -- accumulated count
+//
+// Use [DecodeCounter] or [Counter.UnmarshalCIP] to decode from raw bytes.
 type Counter struct {
 	PRE int32 // Preset
 	ACC int32 // Accumulated
@@ -26,21 +27,22 @@ type Counter struct {
 	UN  bool  // Underflow
 }
 
+// Rockwell Logix counter status-bit positions within the 32-bit status DINT.
 const (
-	// CounterStatusCU is the bit position for Count Up
+	// CounterStatusCU is the bit position for Count Up enabled.
 	CounterStatusCU = 31
-	// CounterStatusCD is the bit position for Count Down
+	// CounterStatusCD is the bit position for Count Down enabled.
 	CounterStatusCD = 30
-	// CounterStatusDN is the bit position for Done
+	// CounterStatusDN is the bit position for Done (ACC >= PRE).
 	CounterStatusDN = 29
-	// CounterStatusOV is the bit position for Overflow
+	// CounterStatusOV is the bit position for Overflow.
 	CounterStatusOV = 28
-	// CounterStatusUN is the bit position for Underflow
+	// CounterStatusUN is the bit position for Underflow.
 	CounterStatusUN = 27
 )
 
-// DecodeCounter decodes a byte slice into a Counter struct.
-// It expects the canonical Rockwell memory layout (14 bytes).
+// DecodeCounter decodes a byte slice into a Counter struct. It expects at
+// least 14 bytes in the canonical Rockwell Logix counter memory layout.
 func DecodeCounter(data []byte) (*Counter, error) {
 	if len(data) < 14 {
 		return nil, fmt.Errorf("insufficient data for Counter: expected at least 14 bytes, got %d", len(data))
@@ -73,7 +75,7 @@ func DecodeCounter(data []byte) (*Counter, error) {
 	return c, nil
 }
 
-// UnmarshalCIP implements the Unmarshaler interface for Counter.
+// UnmarshalCIP implements the [Unmarshaler] interface for Counter.
 func (c *Counter) UnmarshalCIP(data []byte) error {
 	decoded, err := DecodeCounter(data)
 	if err != nil {
@@ -83,7 +85,8 @@ func (c *Counter) UnmarshalCIP(data []byte) error {
 	return nil
 }
 
-// MarshalCIP implements the Marshaler interface for Counter.
+// MarshalCIP implements the [Marshaler] interface for Counter, encoding the
+// struct into the 14-byte Rockwell Logix counter memory layout.
 func (c *Counter) MarshalCIP() ([]byte, error) {
 	buf := new(bytes.Buffer)
 

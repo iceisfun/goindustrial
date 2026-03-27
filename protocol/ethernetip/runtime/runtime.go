@@ -1,3 +1,23 @@
+// Package runtime manages the UDP-based implicit (cyclic) I/O messaging
+// runtime for EtherNet/IP.
+//
+// In EtherNet/IP, implicit messaging is the mechanism by which a scanner and
+// adapter exchange process data at a fixed rate over UDP. After a Forward Open
+// establishes a connection, both sides send and receive I/O data packets at
+// the Requested Packet Interval (RPI). This package provides the Runtime
+// (UDP listener and consumer) and Scheduler (producer) that together handle
+// that cyclic data exchange.
+//
+// Typical usage:
+//
+//  1. Create an assembly.AssemblyObject and register Input/Output instances.
+//  2. Create a Runtime with NewRuntime, then call Start to begin listening.
+//  3. When a Forward Open succeeds, call AddConnection to register the I/O
+//     connection with the runtime.
+//  4. Create a Scheduler with NewScheduler and call Start to begin producing
+//     data at each connection's RPI.
+//  5. On Forward Close, call RemoveConnection to tear down the connection.
+//  6. Call Scheduler.Stop and Runtime.Stop during shutdown.
 package runtime
 
 import (
@@ -9,7 +29,10 @@ import (
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/objects/assembly"
 )
 
-// IOConnection represents a cyclic I/O connection
+// IOConnection represents a single cyclic I/O connection between a scanner
+// and an adapter. It tracks the connection parameters negotiated during
+// Forward Open, the associated assembly instance, and timing state for
+// production and consumption.
 type IOConnection struct {
 	ConnectionID  uint32
 	RPI           time.Duration
@@ -25,7 +48,10 @@ type IOConnection struct {
 	StopChan      chan struct{}
 }
 
-// Runtime manages the UDP server and I/O connections
+// Runtime manages the UDP listener that receives implicit I/O packets and
+// dispatches them to the correct assembly instance. It also runs a watchdog
+// that removes connections that have not received data within their timeout
+// window. All methods are safe for concurrent use.
 type Runtime struct {
 	mu          sync.RWMutex
 	conn        *net.UDPConn
@@ -35,7 +61,8 @@ type Runtime struct {
 	wg          sync.WaitGroup
 }
 
-// NewRuntime creates a new Runtime
+// NewRuntime creates a new Runtime backed by the given AssemblyObject. The
+// runtime is not started until Start is called.
 func NewRuntime(ao *assembly.AssemblyObject) *Runtime {
 	return &Runtime{
 		connections: make(map[uint32]*IOConnection),
@@ -43,7 +70,9 @@ func NewRuntime(ao *assembly.AssemblyObject) *Runtime {
 	}
 }
 
-// Start starts the UDP listener on the given address (e.g. ":2222")
+// Start begins listening for implicit I/O UDP packets on the given address
+// (for example ":2222" or "0.0.0.0:2222"). It spawns a listener goroutine
+// and a watchdog goroutine. Use Stop to shut down both.
 func (r *Runtime) Start(address string) error {
 	addr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
@@ -70,7 +99,9 @@ func (r *Runtime) Start(address string) error {
 	return nil
 }
 
-// AddConnection adds a connection to the runtime
+// AddConnection registers an I/O connection with the runtime. The connection's
+// LastReceive timestamp is set to the current time, and it becomes eligible
+// for the watchdog timeout check.
 func (r *Runtime) AddConnection(conn *IOConnection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -95,8 +126,9 @@ func (r *Runtime) RemoveConnection(connID uint32) {
 	}
 }
 
-// Addr returns the local UDP address the runtime is listening on.
-// Useful for tests to discover the ephemeral port.
+// Addr returns the local UDP address the runtime is listening on, or nil if
+// the runtime has not been started. This is useful in tests to discover the
+// ephemeral port assigned by the OS.
 func (r *Runtime) Addr() *net.UDPAddr {
 	if r.conn != nil {
 		return r.conn.LocalAddr().(*net.UDPAddr)
@@ -173,7 +205,8 @@ func (r *Runtime) listenLoop() {
 	}
 }
 
-// Stop stops the runtime, closing the UDP connection and waiting for goroutines to exit
+// Stop shuts down the runtime by closing the UDP connection and waiting for
+// the listener and watchdog goroutines to exit.
 func (r *Runtime) Stop() {
 	close(r.done)
 	if r.conn != nil {

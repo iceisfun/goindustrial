@@ -6,10 +6,14 @@ import (
 	"sync"
 )
 
-// HandlerFunc is a function that processes a Modbus request and returns a response.
+// HandlerFunc is a callback that processes a single Modbus request and returns
+// a response. Handlers are registered on a [Server] per function code via
+// [Server.SetHandler].
 type HandlerFunc func(ctx context.Context, request *Request) (*Response, error)
 
-// DefaultHandlerFunc returns a "not implemented" error for any request.
+// DefaultHandlerFunc is a [HandlerFunc] that responds with the "function code
+// not supported" Modbus exception for any request. It is used as a fallback
+// when no handler is registered for a given function code.
 func DefaultHandlerFunc(ctx context.Context, request *Request) (*Response, error) {
 	return nil, NewModbusError(
 		request.GetPDU().FunctionCode,
@@ -17,7 +21,10 @@ func DefaultHandlerFunc(ctx context.Context, request *Request) (*Response, error
 	)
 }
 
-// DataStore represents a Modbus data store with read/write capabilities.
+// DataStore abstracts the server-side storage for all four Modbus data types
+// (coils, discrete inputs, holding registers, and input registers). Implement
+// this interface to back a [Server] with custom storage such as a database or
+// a hardware driver. See [MemoryStore] for the default in-memory implementation.
 type DataStore interface {
 	// ReadCoils reads coil values from the data store.
 	ReadCoils(ctx context.Context, address Address, quantity Quantity) ([]CoilValue, error)
@@ -44,8 +51,10 @@ type DataStore interface {
 	WriteMultipleRegisters(ctx context.Context, address Address, values []RegisterValue) error
 }
 
-// MemoryStore implements DataStore with in-memory storage.
-// Provides storage for all four Modbus data types as defined in the specification.
+// MemoryStore is a thread-safe, in-memory implementation of [DataStore].
+// It stores all four Modbus data types (coils, discrete inputs, holding
+// registers, and input registers) in Go maps. Unwritten addresses read as
+// the zero value for their type (false for bits, 0 for registers).
 type MemoryStore struct {
 	coils            map[Address]CoilValue
 	discreteInputs   map[Address]DiscreteInputValue
@@ -54,7 +63,7 @@ type MemoryStore struct {
 	mu               sync.RWMutex
 }
 
-// NewMemoryStore creates a new memory-based data store.
+// NewMemoryStore creates a new, empty MemoryStore ready for use.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		coils:            make(map[Address]CoilValue),
@@ -264,7 +273,8 @@ func (s *MemoryStore) SetInputRegister(address Address, value InputRegisterValue
 	s.inputRegisters[address] = value
 }
 
-// DumpRegisters returns a string representation of the memory store's content.
+// DumpRegisters returns a human-readable string listing all non-zero values
+// in the store, useful for debugging and testing.
 func (s *MemoryStore) DumpRegisters() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

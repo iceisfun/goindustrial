@@ -10,26 +10,54 @@ import (
 	"github.com/iceisfun/goindustrial/plc"
 )
 
-// Clusterable is implemented by data point types that support read clustering.
-// The monitor uses this interface to merge nearby addresses into single reads.
+// Clusterable is implemented by [plc.DataPoint] types that support read
+// clustering. The [ClusteringReader] uses this interface to merge nearby
+// addresses into block reads, reducing network round trips for protocols
+// like Modbus TCP.
+//
+// Implementors must provide an area key for grouping (e.g., "holding" or
+// "coil"), a start address and quantity, and methods to merge address ranges
+// and extract sub-ranges from block read results.
 type Clusterable interface {
 	plc.DataPoint
-	ClusterKey() string                                          // area grouping key
-	ClusterAddr() uint16                                         // start address
-	ClusterQty() uint16                                          // unit count
-	ClusterBitsPerUnit() uint16                                  // 16 for registers, 1 for coils
-	ClusterMerge(start, count uint16) plc.DataPoint              // create merged point
-	ClusterExtract(val plc.Value, clusterStart uint16) plc.Value // extract sub-range
+
+	// ClusterKey returns an area grouping key (e.g., "holding-registers").
+	// Points with different keys are never merged.
+	ClusterKey() string
+
+	// ClusterAddr returns the starting address of this data point.
+	ClusterAddr() uint16
+
+	// ClusterQty returns the number of units (registers or coils) this
+	// point spans.
+	ClusterQty() uint16
+
+	// ClusterBitsPerUnit returns the bit width of each unit: 16 for
+	// registers, 1 for coils and discrete inputs.
+	ClusterBitsPerUnit() uint16
+
+	// ClusterMerge creates a new [plc.DataPoint] representing the merged
+	// read window starting at start with the given count of units.
+	ClusterMerge(start, count uint16) plc.DataPoint
+
+	// ClusterExtract extracts this point's value from a block read result
+	// that started at clusterStart.
+	ClusterExtract(val plc.Value, clusterStart uint16) plc.Value
 }
 
-// Registrar is implemented by readers that accept point registration hints.
-// The monitor calls Register/Unregister when subscriptions are created/removed.
+// Registrar is implemented by readers that accept point registration hints so
+// they can pre-compute optimized read plans. The [Monitor] calls Register when
+// a subscription is created and Unregister when it is stopped.
+// [ClusteringReader] implements this interface.
 type Registrar interface {
+	// Register informs the reader about data points that will be read.
 	Register(points ...plc.DataPoint)
+	// Unregister tells the reader that the given data points are no longer needed.
 	Unregister(points ...plc.DataPoint)
 }
 
-// ClusterConfig holds clustering parameters.
+// ClusterConfig holds parameters that control how nearby addresses are merged
+// into block reads.
 type ClusterConfig struct {
 	// GapThreshold is the max gap (in register/coil units) between two points
 	// that will be merged into a single read window. Default: 32.
@@ -53,25 +81,33 @@ type ClusterConfig struct {
 	Enabled bool
 }
 
-// ClusterOption configures a ClusteringReader.
+// ClusterOption configures a [ClusteringReader] created by
+// [NewClusteringReader].
 type ClusterOption func(*ClusteringReader)
 
-// WithGapThreshold sets the maximum gap between addresses for merging.
+// WithGapThreshold sets the maximum gap (in register or coil units) between
+// two addresses that will still be merged into a single block read.
 func WithGapThreshold(gap uint16) ClusterOption {
 	return func(r *ClusteringReader) { r.config.GapThreshold = gap }
 }
 
-// WithMaxRegistersPerRead sets the max registers in a single read.
+// WithMaxRegistersPerRead sets the upper limit on the number of registers that
+// may be read in a single block request. The Modbus specification allows up to
+// 125; the default is 120 to leave headroom.
 func WithMaxRegistersPerRead(max uint16) ClusterOption {
 	return func(r *ClusteringReader) { r.config.MaxRegistersPerRead = max }
 }
 
-// WithMaxCoilsPerRead sets the max coils in a single read.
+// WithMaxCoilsPerRead sets the upper limit on the number of coils or discrete
+// inputs that may be read in a single block request.
 func WithMaxCoilsPerRead(max uint16) ClusterOption {
 	return func(r *ClusteringReader) { r.config.MaxCoilsPerRead = max }
 }
 
-// WithCacheTTL sets how long clustered read data is cached.
+// WithCacheTTL sets how long clustered read results are cached. While the
+// cache is fresh, concurrent subscription goroutines reading from the same
+// cluster window share a single network request. A zero TTL (the default)
+// disables caching.
 func WithCacheTTL(ttl time.Duration) ClusterOption {
 	return func(r *ClusteringReader) { r.config.CacheTTL = ttl }
 }
@@ -81,8 +117,15 @@ func WithClusteringEnabled(enabled bool) ClusterOption {
 	return func(r *ClusteringReader) { r.config.Enabled = enabled }
 }
 
-// ClusteringReader wraps a plc.Reader and coalesces nearby Modbus addresses
-// into block reads, reducing the number of protocol requests.
+// ClusteringReader wraps a [plc.Reader] and coalesces nearby Modbus register
+// or coil addresses into block reads, reducing the number of protocol round
+// trips. It implements both [plc.Reader] and [Registrar].
+//
+// As subscriptions are registered via [ClusteringReader.Register], a read plan
+// of contiguous windows is built. When [ClusteringReader.Read] is called, each
+// requested point is served from the smallest window that covers it. A
+// singleflight mechanism ensures that concurrent reads targeting the same
+// window produce only one network request.
 type ClusteringReader struct {
 	inner  plc.Reader
 	config ClusterConfig
@@ -105,7 +148,8 @@ type ClusteringReader struct {
 	// in-flight reads that used a stale plan.
 	gen atomic.Int64
 
-	// ReadCount tracks total inner reads for testing/monitoring.
+	// ReadCount tracks the total number of reads dispatched to the inner
+	// reader, useful for testing and performance monitoring.
 	ReadCount atomic.Int64
 }
 
@@ -120,7 +164,9 @@ type flightEntry struct {
 	err  error
 }
 
-// NewClusteringReader creates a clustering reader wrapping the given reader.
+// NewClusteringReader creates a [ClusteringReader] that wraps the given
+// [plc.Reader]. Use [ClusterOption] values to tune gap thresholds, maximum
+// read sizes, and caching behavior.
 func NewClusteringReader(inner plc.Reader, opts ...ClusterOption) *ClusteringReader {
 	r := &ClusteringReader{
 		inner: inner,
@@ -139,7 +185,9 @@ func NewClusteringReader(inner plc.Reader, opts ...ClusterOption) *ClusteringRea
 	return r
 }
 
-// Register adds points to the clustering plan. Thread-safe.
+// Register adds data points to the clustering plan and rebuilds the read
+// windows. Non-[Clusterable] points are silently ignored. This method is
+// safe for concurrent use.
 func (r *ClusteringReader) Register(points ...plc.DataPoint) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -152,7 +200,9 @@ func (r *ClusteringReader) Register(points ...plc.DataPoint) {
 	r.replan()
 }
 
-// Unregister removes points from the clustering plan. Thread-safe.
+// Unregister removes data points from the clustering plan and rebuilds the
+// read windows. Non-[Clusterable] points are silently ignored. This method is
+// safe for concurrent use.
 func (r *ClusteringReader) Unregister(points ...plc.DataPoint) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -185,8 +235,10 @@ func (r *ClusteringReader) replan() {
 	r.cacheMu.Unlock()
 }
 
-// Read implements plc.Reader. It clusters Clusterable points into block reads
-// and extracts the requested sub-ranges from the results.
+// Read implements [plc.Reader]. For [Clusterable] points that fall within a
+// pre-computed cluster window, it performs a single block read of the window
+// and extracts the requested sub-range. Non-clusterable points and points not
+// covered by any window are read individually through the inner reader.
 func (r *ClusteringReader) Read(ctx context.Context, points ...plc.DataPoint) ([]plc.Value, error) {
 	if !r.config.Enabled {
 		r.ReadCount.Add(int64(len(points)))

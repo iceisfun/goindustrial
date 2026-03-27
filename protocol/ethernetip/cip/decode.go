@@ -7,15 +7,17 @@ import (
 	"reflect"
 )
 
-// Unmarshaler is the interface implemented by types that can unmarshal
-// a CIP binary description of themselves.
+// Unmarshaler is the interface implemented by types that can unmarshal a CIP
+// binary representation of themselves. Types that implement Unmarshaler take
+// priority over the default binary.Read decoding in [Unmarshal].
 type Unmarshaler interface {
 	UnmarshalCIP(data []byte) error
 }
 
-// Unmarshal parses the CIP-encoded data and stores the result
-// in the value pointed to by v. If v is nil or not a pointer,
-// Unmarshal returns an error.
+// Unmarshal parses CIP-encoded data and stores the result in the value pointed
+// to by v. If v implements [Unmarshaler] its UnmarshalCIP method is called;
+// otherwise binary.Read with little-endian byte order is used. v must be a
+// non-nil pointer.
 func Unmarshal(data []byte, v any) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {

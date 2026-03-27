@@ -7,8 +7,9 @@ import (
 	"time"
 )
 
-// Request represents a Modbus TCP request with MBAP header and PDU.
-// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 4.1 (MBAP Header format)
+// Request represents a Modbus TCP request. It carries the MBAP header fields
+// (transaction ID, protocol ID, unit ID) and a [PDU] containing the function
+// code and request-specific data.
 type Request struct {
 	TransactionID TransactionID
 	ProtocolID    ProtocolID
@@ -17,7 +18,9 @@ type Request struct {
 	Create        time.Time
 }
 
-// NewRequest creates a new Request with the given unit ID, function code, and data.
+// NewRequest creates a new Request with the given unit ID, function code, and
+// PDU data. The transaction ID is left at zero and is assigned later by the
+// [TransactionPool].
 func NewRequest(unitID UnitID, functionCode FunctionCode, data []byte) *Request {
 	return &Request{
 		ProtocolID: TCPProtocolIdentifier,
@@ -50,8 +53,8 @@ func (r *Request) GetPDU() *PDU {
 	return r.PDU
 }
 
-// Encode encodes a Request into bytes (MBAP header + PDU, big-endian).
-// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 4.1 (MBAP Header format)
+// Encode serialises the Request into a Modbus TCP frame (MBAP header + PDU)
+// with big-endian byte order, ready to be written to a TCP connection.
 func (r *Request) Encode() ([]byte, error) {
 	// Length field = Unit ID (1 byte) + Function Code (1 byte) + Data (N bytes)
 	length := uint16(1 + 1 + len(r.PDU.Data))
@@ -83,8 +86,8 @@ func (r *Request) Encode() ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-// Decode decodes a Request from bytes.
-// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 4.1 (MBAP Header) and Section 6 (PDU format)
+// Decode deserialises a Modbus TCP frame (MBAP header + PDU) from the given
+// byte slice and populates the Request fields.
 func (r *Request) Decode(data []byte) error {
 	if len(data) < TCPHeaderLength {
 		return ErrInvalidResponseLength
@@ -130,12 +133,13 @@ func (r *Request) Decode(data []byte) error {
 	return nil
 }
 
-// GetLifetime returns the lifetime of the request.
+// GetLifetime returns the elapsed time since the request was created.
 func (r *Request) GetLifetime() time.Duration {
 	return time.Since(r.Create)
 }
 
-// Cancel is called when a transaction is cancelled.
+// Cancel is called when the owning transaction is cancelled. It is a cleanup
+// hook; the default implementation is a no-op.
 func (r *Request) Cancel(err error) {
 	// Cleanup hook; currently a no-op.
 }

@@ -12,8 +12,9 @@ import (
 	"github.com/iceisfun/goindustrial/logging"
 )
 
-// TCPConn is an MBAP-framed TCP connection that manages a single TCP socket
-// with read/write goroutines and a transaction pool. It is the connection type
+// TCPConn is a Modbus TCP connection that manages a single TCP socket with
+// concurrent read/write goroutines and a [TransactionPool] for matching
+// requests to responses via MBAP transaction IDs. It is the connection type
 // used by transport.Transport[*TCPConn].
 type TCPConn struct {
 	logger          logging.Logger
@@ -32,7 +33,9 @@ type TCPConn struct {
 	done            chan struct{}
 }
 
-// NewTCPConn creates a new TCPConn with the given host and options.
+// NewTCPConn creates a new, unconnected TCPConn for the given host. Call
+// [TCPConn.Connect] to establish the TCP connection and start the read/write
+// goroutines. Use [TCPConnOption] values to configure port, timeout, and logger.
 func NewTCPConn(host string, options ...TCPConnOption) *TCPConn {
 	c := &TCPConn{
 		logger:          logging.NewNopLogger(),
@@ -158,7 +161,9 @@ func (c *TCPConn) IsConnected() bool {
 	return c.connected
 }
 
-// Send sends a request and waits for the matching response.
+// Send sends a Modbus request and blocks until the matching response arrives,
+// the context expires, or the connection is closed. The MBAP transaction ID is
+// assigned automatically by the underlying [TransactionPool].
 func (c *TCPConn) Send(ctx context.Context, request *Request) (*Response, error) {
 	if !c.IsConnected() {
 		return nil, ErrNotConnected
@@ -197,7 +202,8 @@ func (c *TCPConn) Send(ctx context.Context, request *Request) (*Response, error)
 	}
 }
 
-// ResetTransactions resets the transaction pool without disconnecting.
+// ResetTransactions cancels all in-flight transactions and resets the
+// transaction pool without closing the TCP connection.
 func (c *TCPConn) ResetTransactions(ctx context.Context) {
 	c.logger.Info(ctx, "Resetting transaction pool")
 
@@ -435,14 +441,16 @@ func (c *TCPConn) setDisconnected(err error) {
 // TCPConnector implements transport.Connector[*TCPConn]
 // ---------------------------------------------------------------------------
 
-// TCPConnector creates new TCPConn instances and connects them.
-// It implements transport.Connector[*TCPConn].
+// TCPConnector creates and connects [TCPConn] instances. It implements
+// transport.Connector[*TCPConn] and is used by the reconnecting transport
+// to establish new connections on demand.
 type TCPConnector struct {
 	host    string
 	options []TCPConnOption
 }
 
-// NewTCPConnector creates a new TCPConnector.
+// NewTCPConnector creates a new TCPConnector for the given host with optional
+// connection settings.
 func NewTCPConnector(host string, options ...TCPConnOption) *TCPConnector {
 	return &TCPConnector{
 		host:    host,
@@ -463,8 +471,8 @@ func (tc *TCPConnector) Connect(ctx context.Context) (*TCPConn, error) {
 // TCPCloser implements transport.Closer[*TCPConn]
 // ---------------------------------------------------------------------------
 
-// TCPCloser tears down a TCPConn.
-// It implements transport.Closer[*TCPConn].
+// TCPCloser disconnects a [TCPConn]. It implements transport.Closer[*TCPConn]
+// and is used by the reconnecting transport to tear down stale connections.
 type TCPCloser struct{}
 
 // NewTCPCloser creates a new TCPCloser.

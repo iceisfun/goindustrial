@@ -10,10 +10,10 @@ import (
 	"github.com/iceisfun/goindustrial/logging"
 )
 
-// Transaction represents an ongoing Modbus TCP transaction with a request,
-// response channel, and context. The transaction ID in the MBAP header is used
-// to match requests and responses.
-// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 4.1 (MBAP Header)
+// Transaction represents an in-flight Modbus TCP request/response pair. The
+// MBAP transaction ID is used to correlate the response from the server back to
+// the original request. Callers receive the result via the ResponseCh or ErrCh
+// channels.
 type Transaction struct {
 	Request    *Request        // The Modbus request
 	ResponseCh chan *Response  // Channel for receiving the response
@@ -23,7 +23,8 @@ type Transaction struct {
 	createTime time.Time
 }
 
-// NewTransaction creates a new transaction with a given request and context.
+// NewTransaction creates a new Transaction with buffered response and error
+// channels. The transaction inherits a cancellable child of the given context.
 func NewTransaction(ctx context.Context, request *Request) *Transaction {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -37,7 +38,9 @@ func NewTransaction(ctx context.Context, request *Request) *Transaction {
 	}
 }
 
-// Complete signals the transaction is complete with either a response or error.
+// Complete signals that the transaction has finished. Exactly one of response or
+// err should be non-nil. The result is delivered via the ResponseCh or ErrCh
+// channel respectively, and the transaction's context is cancelled.
 func (t *Transaction) Complete(response *Response, err error) {
 	if err != nil {
 		select {
@@ -63,7 +66,7 @@ func (t *Transaction) Context() context.Context {
 	return t.ctx
 }
 
-// GetLifetime returns the transaction's lifetime.
+// GetLifetime returns the elapsed time since the transaction was created.
 func (t *Transaction) GetLifetime() time.Duration {
 	return time.Since(t.createTime)
 }
@@ -81,7 +84,10 @@ const (
 	maxIDAttempts = 16
 )
 
-// TransactionPool manages a pool of active Modbus TCP transactions.
+// TransactionPool manages the set of active (in-flight) Modbus TCP
+// transactions. It assigns unique 16-bit transaction IDs, tracks pending
+// requests, and automatically cancels transactions that exceed the configured
+// timeout.
 type TransactionPool struct {
 	logger          logging.Logger
 	transactions    map[TransactionID]*Transaction
@@ -91,10 +97,12 @@ type TransactionPool struct {
 	timeoutDuration time.Duration
 }
 
-// TransactionPoolOption is a function that configures a TransactionPool.
+// TransactionPoolOption is a functional option for configuring a
+// [TransactionPool].
 type TransactionPoolOption func(*TransactionPool)
 
-// WithPoolTimeout sets the timeout duration for transactions.
+// WithPoolTimeout sets the maximum time a transaction may remain in-flight
+// before being automatically cancelled. The default is 5 seconds.
 func WithPoolTimeout(timeout time.Duration) TransactionPoolOption {
 	return func(tp *TransactionPool) {
 		if timeout > 0 {
@@ -110,7 +118,9 @@ func WithPoolLogger(logger logging.Logger) TransactionPoolOption {
 	}
 }
 
-// NewTransactionPool creates a new transaction pool.
+// NewTransactionPool creates a new TransactionPool and starts a background
+// goroutine that monitors for timed-out transactions. Call [TransactionPool.Close]
+// to stop the monitor and cancel all pending transactions.
 func NewTransactionPool(options ...TransactionPoolOption) *TransactionPool {
 	pool := &TransactionPool{
 		logger:          logging.NewNopLogger(),
@@ -129,7 +139,8 @@ func NewTransactionPool(options ...TransactionPoolOption) *TransactionPool {
 	return pool
 }
 
-// Close shuts down the transaction pool.
+// Close stops the timeout monitor, cancels all pending transactions, and
+// prevents new transactions from being placed.
 func (tp *TransactionPool) Close() {
 	ctx := context.Background()
 	tp.logger.Info(ctx, "Closing transaction pool")
@@ -192,7 +203,9 @@ func (tp *TransactionPool) GetCount() int {
 	return len(tp.transactions)
 }
 
-// Place adds a transaction to the pool and assigns it a transaction ID.
+// Place creates a new [Transaction] for the given request, assigns it a unique
+// transaction ID, and adds it to the pool. The transaction ID is also written
+// into the request's MBAP header.
 func (tp *TransactionPool) Place(ctx context.Context, request *Request) (*Transaction, error) {
 	tp.transactionsMu.Lock()
 	defer tp.transactionsMu.Unlock()
@@ -231,7 +244,7 @@ func (tp *TransactionPool) Place(ctx context.Context, request *Request) (*Transa
 	return tx, nil
 }
 
-// Get retrieves a transaction by its ID without removing it.
+// Get retrieves a transaction by its ID without removing it from the pool.
 func (tp *TransactionPool) Get(txID TransactionID) (*Transaction, bool) {
 	tp.transactionsMu.Lock()
 	defer tp.transactionsMu.Unlock()
@@ -240,7 +253,8 @@ func (tp *TransactionPool) Get(txID TransactionID) (*Transaction, bool) {
 	return tx, exists
 }
 
-// Release removes a transaction from the pool and returns it.
+// Release removes a transaction from the pool and returns it. The caller is
+// responsible for completing the transaction via [Transaction.Complete].
 func (tp *TransactionPool) Release(txID TransactionID) (result *Transaction, ok bool) {
 	tp.transactionsMu.Lock()
 	defer tp.transactionsMu.Unlock()

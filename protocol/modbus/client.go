@@ -11,8 +11,11 @@ import (
 	"github.com/iceisfun/goindustrial/transport"
 )
 
-// Client is a Modbus TCP client that wraps a transport.Transport[*TCPConn]
-// and exposes both Modbus-specific methods and the plc.PLC interface.
+// Client is a Modbus TCP client that communicates with a remote device over
+// a managed TCP connection. It exposes Modbus-specific read/write methods
+// (e.g. [Client.ReadHoldingRegisters]) as well as the generic
+// [github.com/iceisfun/goindustrial/plc.PLC] interface for protocol-agnostic use.
+// Transport-level reconnection and retry logic are handled automatically.
 type Client struct {
 	logger    logging.Logger
 	transport transport.Transport[*TCPConn]
@@ -25,8 +28,11 @@ type Client struct {
 // Compile-time assertion that Client implements plc.PLC.
 var _ plc.PLC = (*Client)(nil)
 
-// Connect is a convenience constructor that creates a ReconnectingTransport,
-// obtains an initial connection, and returns a ready-to-use Client.
+// Connect dials a Modbus TCP server at host (e.g. "192.168.1.10") and returns
+// a ready-to-use Client. It creates a reconnecting transport, verifies
+// reachability with an initial connection, and applies any provided options.
+// Options may be [TCPConnOption], [ClientOption], or [transport.Option] values
+// and are routed to the appropriate layer automatically.
 func Connect(ctx context.Context, host string, opts ...any) (*Client, error) {
 	var connOpts []TCPConnOption
 	var clientOpts []ClientOption
@@ -57,7 +63,9 @@ func Connect(ctx context.Context, host string, opts ...any) (*Client, error) {
 	return NewClient(tp, clientOpts...), nil
 }
 
-// NewClient creates a Client from an existing transport.
+// NewClient creates a Client from an existing transport. Use this when you
+// need full control over the transport layer; for most cases [Connect] is
+// simpler.
 func NewClient(tp transport.Transport[*TCPConn], opts ...ClientOption) *Client {
 	c := &Client{
 		logger:     logging.NewNopLogger(),
@@ -105,8 +113,9 @@ func (c *Client) IsConnected() bool {
 	return conn.IsConnected()
 }
 
-// Read dispatches to the appropriate Modbus read function based on the
-// DataPoint type and returns the raw bytes.
+// Read satisfies [plc.PLC]. It dispatches each DataPoint to the appropriate
+// Modbus read function based on its concrete type ([HoldingRegister],
+// [InputRegister], [Coil], or [DiscreteInput]) and returns the values.
 func (c *Client) Read(ctx context.Context, points ...plc.DataPoint) ([]plc.Value, error) {
 	results := make([]plc.Value, 0, len(points))
 
@@ -122,8 +131,10 @@ func (c *Client) Read(ctx context.Context, points ...plc.DataPoint) ([]plc.Value
 	return results, nil
 }
 
-// Write dispatches to the appropriate Modbus write function based on the
-// DataPoint type.
+// Write satisfies [plc.PLC]. It dispatches the write to the appropriate Modbus
+// write function based on the DataPoint's concrete type ([HoldingRegister] or
+// [Coil]). Input registers and discrete inputs are read-only and cannot be
+// written.
 func (c *Client) Write(ctx context.Context, point plc.DataPoint, data []byte) error {
 	switch dp := point.(type) {
 	case HoldingRegister:
@@ -308,7 +319,8 @@ func (c *Client) send(ctx context.Context, functionCode FunctionCode, data []byt
 // Modbus-specific methods
 // ---------------------------------------------------------------------------
 
-// ReadCoils reads coils from the server.
+// ReadCoils reads one or more coil values starting at address (function code 0x01).
+// Coils are single-bit read/write outputs. The quantity must be between 1 and 2000.
 func (c *Client) ReadCoils(ctx context.Context, address Address, quantity Quantity) ([]CoilValue, error) {
 	c.logger.Debug(ctx, "Reading %d coils from address %d", quantity, address)
 
@@ -325,7 +337,9 @@ func (c *Client) ReadCoils(ctx context.Context, address Address, quantity Quanti
 	return c.protocol.ParseReadCoilsResponse(response.GetPDU().Data, quantity)
 }
 
-// ReadDiscreteInputs reads discrete inputs from the server.
+// ReadDiscreteInputs reads one or more discrete input values starting at address
+// (function code 0x02). Discrete inputs are single-bit read-only values.
+// The quantity must be between 1 and 2000.
 func (c *Client) ReadDiscreteInputs(ctx context.Context, address Address, quantity Quantity) ([]DiscreteInputValue, error) {
 	c.logger.Debug(ctx, "Reading %d discrete inputs from address %d", quantity, address)
 
@@ -342,7 +356,9 @@ func (c *Client) ReadDiscreteInputs(ctx context.Context, address Address, quanti
 	return c.protocol.ParseReadDiscreteInputsResponse(response.GetPDU().Data, quantity)
 }
 
-// ReadHoldingRegisters reads holding registers from the server.
+// ReadHoldingRegisters reads one or more 16-bit holding register values starting
+// at address (function code 0x03). Holding registers are the primary read/write
+// data storage in a Modbus device. The quantity must be between 1 and 125.
 func (c *Client) ReadHoldingRegisters(ctx context.Context, address Address, quantity Quantity) ([]RegisterValue, error) {
 	c.logger.Debug(ctx, "Reading %d holding registers from address %d", quantity, address)
 
@@ -359,7 +375,9 @@ func (c *Client) ReadHoldingRegisters(ctx context.Context, address Address, quan
 	return c.protocol.ParseReadHoldingRegistersResponse(response.GetPDU().Data, quantity)
 }
 
-// ReadInputRegisters reads input registers from the server.
+// ReadInputRegisters reads one or more 16-bit input register values starting at
+// address (function code 0x04). Input registers are read-only data typically
+// sourced from sensors or process values. The quantity must be between 1 and 125.
 func (c *Client) ReadInputRegisters(ctx context.Context, address Address, quantity Quantity) ([]InputRegisterValue, error) {
 	c.logger.Debug(ctx, "Reading %d input registers from address %d", quantity, address)
 
@@ -376,7 +394,8 @@ func (c *Client) ReadInputRegisters(ctx context.Context, address Address, quanti
 	return c.protocol.ParseReadInputRegistersResponse(response.GetPDU().Data, quantity)
 }
 
-// WriteSingleCoil writes a single coil to the server.
+// WriteSingleCoil writes a single coil output at address (function code 0x05).
+// A coil is a single-bit value; true turns it ON, false turns it OFF.
 func (c *Client) WriteSingleCoil(ctx context.Context, address Address, value CoilValue) error {
 	c.logger.Info(ctx, "Writing coil at address %d with value %t", address, value)
 
@@ -394,7 +413,8 @@ func (c *Client) WriteSingleCoil(ctx context.Context, address Address, value Coi
 	return err
 }
 
-// WriteSingleRegister writes a single register to the server.
+// WriteSingleRegister writes a single 16-bit holding register at address
+// (function code 0x06).
 func (c *Client) WriteSingleRegister(ctx context.Context, address Address, value RegisterValue) error {
 	c.logger.Info(ctx, "Writing register at address %d with value %d", address, value)
 
@@ -412,7 +432,8 @@ func (c *Client) WriteSingleRegister(ctx context.Context, address Address, value
 	return err
 }
 
-// WriteMultipleCoils writes multiple coils to the server.
+// WriteMultipleCoils writes a contiguous block of coil outputs starting at
+// address (function code 0x0F). Up to 1968 coils may be written per request.
 func (c *Client) WriteMultipleCoils(ctx context.Context, address Address, values []CoilValue) error {
 	c.logger.Info(ctx, "Writing %d coils starting at address %d", len(values), address)
 
@@ -430,7 +451,9 @@ func (c *Client) WriteMultipleCoils(ctx context.Context, address Address, values
 	return err
 }
 
-// WriteMultipleRegisters writes multiple registers to the server.
+// WriteMultipleRegisters writes a contiguous block of 16-bit holding registers
+// starting at address (function code 0x10). Up to 123 registers may be written
+// per request.
 func (c *Client) WriteMultipleRegisters(ctx context.Context, address Address, values []RegisterValue) error {
 	c.logger.Info(ctx, "Writing %d registers starting at address %d", len(values), address)
 
@@ -448,7 +471,9 @@ func (c *Client) WriteMultipleRegisters(ctx context.Context, address Address, va
 	return err
 }
 
-// ReadWriteMultipleRegisters reads and writes multiple registers in a single transaction.
+// ReadWriteMultipleRegisters atomically writes holding registers and reads
+// holding registers in a single Modbus transaction (function code 0x17).
+// The write is performed before the read on the server side.
 func (c *Client) ReadWriteMultipleRegisters(ctx context.Context, readAddress Address, readQuantity Quantity, writeAddress Address, writeValues []RegisterValue) ([]RegisterValue, error) {
 	c.logger.Debug(ctx, "Reading %d registers from %d and writing %d registers to %d",
 		readQuantity, readAddress, len(writeValues), writeAddress)
@@ -466,7 +491,9 @@ func (c *Client) ReadWriteMultipleRegisters(ctx context.Context, readAddress Add
 	return c.protocol.ParseReadWriteMultipleRegistersResponse(response.GetPDU().Data, readQuantity)
 }
 
-// ReadExceptionStatus reads the exception status from the server.
+// ReadExceptionStatus reads the eight exception status coils from the server
+// (function code 0x07). The returned ExceptionStatus is a bitmask of eight
+// device-specific status bits.
 func (c *Client) ReadExceptionStatus(ctx context.Context) (ExceptionStatus, error) {
 	c.logger.Info(ctx, "Reading exception status")
 
@@ -483,7 +510,10 @@ func (c *Client) ReadExceptionStatus(ctx context.Context) (ExceptionStatus, erro
 	return c.protocol.ParseReadExceptionStatusResponse(response.GetPDU().Data)
 }
 
-// ReadDeviceIdentification reads device identification data from the server.
+// ReadDeviceIdentification reads device identification objects such as vendor
+// name, product code, and revision from the server (function code 0x2B / MEI
+// type 0x0E). The readDeviceIDCode selects which category of objects to
+// retrieve, and objectID specifies the starting object.
 func (c *Client) ReadDeviceIdentification(ctx context.Context, readDeviceIDCode ReadDeviceIDCode, objectID DeviceIDObjectCode) (*DeviceIdentification, error) {
 	c.logger.Debug(ctx, "Reading device identification: code=%d, objectID=%d", readDeviceIDCode, objectID)
 

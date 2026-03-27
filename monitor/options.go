@@ -7,7 +7,7 @@ import (
 	"github.com/iceisfun/goindustrial/logging"
 )
 
-// MonitorOption configures a Monitor instance.
+// MonitorOption configures a [Monitor] created by [NewMonitor].
 type MonitorOption func(*monitorConfig)
 
 type monitorConfig struct {
@@ -15,14 +15,17 @@ type monitorConfig struct {
 	eventBuffer int
 }
 
-// WithLogger overrides the logger used by the monitor.
+// WithLogger sets the logger used by the monitor for warnings and diagnostics.
+// When not set, a no-op logger is used.
 func WithLogger(logger logging.Logger) MonitorOption {
 	return func(cfg *monitorConfig) {
 		cfg.logger = logger
 	}
 }
 
-// WithEventBuffer configures the size of the event channel buffer.
+// WithEventBuffer sets the capacity of the shared event channel returned by
+// [Monitor.Events]. The default buffer size is 64. Values less than or equal
+// to zero are clamped to 1.
 func WithEventBuffer(size int) MonitorOption {
 	return func(cfg *monitorConfig) {
 		if size <= 0 {
@@ -32,7 +35,7 @@ func WithEventBuffer(size int) MonitorOption {
 	}
 }
 
-// SubscriptionOption configures a subscription.
+// SubscriptionOption configures a subscription created by [Monitor.Subscribe].
 type SubscriptionOption func(*subConfig) error
 
 type subConfig struct {
@@ -50,7 +53,8 @@ func defaultSubConfig() *subConfig {
 	}
 }
 
-// WithFrequency configures the poll interval for a subscription.
+// WithFrequency sets the poll interval for a subscription. The default is
+// 500ms. The value must be positive.
 func WithFrequency(freq time.Duration) SubscriptionOption {
 	return func(cfg *subConfig) error {
 		if freq <= 0 {
@@ -61,8 +65,9 @@ func WithFrequency(freq time.Duration) SubscriptionOption {
 	}
 }
 
-// WithReadVariance adds random timing variance to each poll cycle.
-// The actual delay will be frequency +/- a random value up to variance.
+// WithReadVariance adds random jitter to each poll cycle to prevent multiple
+// subscriptions from issuing reads at the exact same instant. The actual delay
+// is frequency +/- a uniformly random value in [-variance, +variance].
 func WithReadVariance(variance time.Duration) SubscriptionOption {
 	return func(cfg *subConfig) error {
 		if variance < 0 {
@@ -85,7 +90,8 @@ func WithChangeDetector(detector ChangeDetector) SubscriptionOption {
 	}
 }
 
-// WithHandler registers a callback that executes after a successful poll.
+// WithHandler registers a [Handler] callback that is invoked after each
+// successful poll. The handler runs in the subscription's goroutine.
 func WithHandler(handler Handler) SubscriptionOption {
 	return func(cfg *subConfig) error {
 		if handler == nil {
@@ -96,7 +102,9 @@ func WithHandler(handler Handler) SubscriptionOption {
 	}
 }
 
-// WithInitialRead toggles whether a subscription performs an immediate read when created.
+// WithInitialRead controls whether a subscription performs an immediate read
+// when created, before waiting for the first poll interval. The default is
+// true.
 func WithInitialRead(enabled bool) SubscriptionOption {
 	return func(cfg *subConfig) error {
 		cfg.immediate = enabled

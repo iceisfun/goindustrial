@@ -20,8 +20,11 @@ type cipError struct{ err error }
 func (e *cipError) Error() string { return e.err.Error() }
 func (e *cipError) Unwrap() error { return e.err }
 
-// Client is a high-level EtherNet/IP client that uses a generic transport to
-// manage sessions. It implements the plc.PLC interface.
+// Client is a high-level EtherNet/IP client that reads and writes PLC tags
+// over TCP using explicit CIP messaging. It manages sessions through a
+// pluggable transport layer and implements the plc.PLC interface.
+// Use [Connect] for a direct connection, [NewReconnectingClient] for
+// automatic reconnection, or [NewClient] with a custom transport.
 type Client struct {
 	transport  transport.Transport[*Session]
 	logger     logging.Logger
@@ -32,7 +35,8 @@ type Client struct {
 // Compile-time check that Client implements plc.PLC.
 var _ plc.PLC = (*Client)(nil)
 
-// NewClient creates a new client backed by the given transport.
+// NewClient creates a new Client backed by the given transport. Apply
+// [ClientOption] values to configure retries, logging, and other behavior.
 func NewClient(t transport.Transport[*Session], opts ...ClientOption) *Client {
 	c := &Client{
 		transport:  t,
@@ -46,8 +50,10 @@ func NewClient(t transport.Transport[*Session], opts ...ClientOption) *Client {
 	return c
 }
 
-// Connect is a convenience constructor that creates a direct (non-reconnecting)
-// client. It connects immediately and returns an error on failure.
+// Connect is a convenience constructor that dials the given address over TCP,
+// registers an EtherNet/IP session, and returns a ready-to-use Client. The
+// connection is direct (non-reconnecting); if it drops, operations will fail
+// until a new Client is created.
 func Connect(ctx context.Context, address string, opts ...ClientOption) (*Client, error) {
 	// Extract logger from options (peek).
 	c := &Client{
@@ -71,8 +77,9 @@ func Connect(ctx context.Context, address string, opts ...ClientOption) (*Client
 	return c, nil
 }
 
-// NewReconnectingClient creates a client that connects lazily and reconnects on
-// failure. The constructor never fails and never connects immediately.
+// NewReconnectingClient creates a Client that connects lazily on the first
+// operation and automatically reconnects after a transport failure. The
+// constructor itself never dials, so it always returns successfully.
 func NewReconnectingClient(address string, opts ...ClientOption) *Client {
 	c := &Client{
 		logger:     logging.NewNopLogger(),
@@ -92,15 +99,15 @@ func NewReconnectingClient(address string, opts ...ClientOption) *Client {
 
 // ---------- plc.PLC interface ----------
 
-// Connect establishes the connection. For a direct transport this is a no-op
-// (already connected). For a reconnecting transport the first Conn call will
-// trigger the dial.
+// Connect establishes the underlying TCP connection and EtherNet/IP session.
+// For a direct transport this is a no-op (already connected). For a
+// reconnecting transport the first call triggers the dial.
 func (c *Client) Connect(ctx context.Context) error {
 	_, err := c.transport.Conn(ctx)
 	return err
 }
 
-// Disconnect closes the transport.
+// Disconnect unregisters the EtherNet/IP session and closes the TCP connection.
 func (c *Client) Disconnect(_ context.Context) error {
 	return c.transport.Close()
 }
@@ -111,7 +118,9 @@ func (c *Client) IsConnected() bool {
 	return err == nil
 }
 
-// Read reads one or more data points. Each DataPoint must be a Tag.
+// Read reads one or more data points from the PLC. Each DataPoint must be a
+// [Tag]. The returned Values contain the raw CIP response bytes (including the
+// 2-byte type code prefix) and a protocol-agnostic type hint.
 func (c *Client) Read(ctx context.Context, points ...plc.DataPoint) ([]plc.Value, error) {
 	values := make([]plc.Value, 0, len(points))
 	for _, dp := range points {
@@ -178,7 +187,8 @@ func cipTypeToPlcType(dt cip.DataType) plc.DataType {
 	}
 }
 
-// Write writes data to a tag on the controller.
+// Write writes raw bytes to a tag on the controller. The data slice must begin
+// with a 2-byte CIP type code followed by the payload bytes.
 func (c *Client) Write(ctx context.Context, point plc.DataPoint, data []byte) error {
 	tag, ok := point.(Tag)
 	if !ok {
@@ -212,21 +222,23 @@ func (c *Client) Write(ctx context.Context, point plc.DataPoint, data []byte) er
 	})
 }
 
-// Close closes the client transport.
+// Close closes the underlying transport and releases all resources.
 func (c *Client) Close() error {
 	return c.transport.Close()
 }
 
 // ---------- Tag-level API ----------
 
-// ReadTag reads a single element of a tag from the PLC.
-// Returns raw bytes including the type code (first 2 bytes).
+// ReadTag reads a single element of a named tag from the PLC using the CIP
+// Read Tag service (0x4C). The returned bytes include the 2-byte CIP type
+// code prefix followed by the element data.
 func (c *Client) ReadTag(ctx context.Context, tagName string) ([]byte, error) {
 	return c.ReadTagElements(ctx, tagName, 1)
 }
 
-// ReadTagElements reads multiple elements of a tag from the PLC.
-// Returns raw bytes including the type code (first 2 bytes).
+// ReadTagElements reads count elements of a named tag from the PLC using the
+// CIP Read Tag service (0x4C). The returned bytes include the 2-byte CIP type
+// code prefix followed by the element data. Count must be at least 1.
 func (c *Client) ReadTagElements(ctx context.Context, tagName string, count uint16) ([]byte, error) {
 	if count == 0 {
 		return nil, fmt.Errorf("element count must be at least 1")
@@ -251,8 +263,10 @@ func (c *Client) ReadTagElements(ctx context.Context, tagName string, count uint
 	return result, err
 }
 
-// WriteTag writes a Go value to a tag on the PLC.
-// The value must be a basic Go type (int, float, etc.) or implement cip.Marshaler.
+// WriteTag writes a Go value to a named tag on the PLC using the CIP Write
+// Tag service (0x4D). The value must be a basic Go numeric type (bool, int32,
+// float64, etc.) or implement [cip.Marshaler]. The CIP type code is inferred
+// automatically from the Go type.
 func (c *Client) WriteTag(ctx context.Context, tagName string, value any) error {
 	p := cip.NewPath()
 	p.AddSymbolicSegment(tagName)
@@ -281,13 +295,16 @@ func (c *Client) WriteTag(ctx context.Context, tagName string, value any) error 
 	})
 }
 
-// ReadTagInto reads a tag from the PLC and unmarshals it into dst.
-// dst must be a pointer to a type that can be unmarshaled.
+// ReadTagInto reads a single element of a named tag from the PLC and
+// unmarshals it into dst. dst must be a pointer to a fixed-size type
+// compatible with binary.Read or a type implementing [cip.Unmarshaler].
 func (c *Client) ReadTagInto(ctx context.Context, tagName string, dst any) error {
 	return c.ReadTagElementsInto(ctx, tagName, 1, dst)
 }
 
-// ReadTagElementsInto reads multiple elements of a tag and unmarshals them into dst.
+// ReadTagElementsInto reads count elements of a named tag from the PLC and
+// unmarshals them into dst. dst must be a pointer to a fixed-size type or
+// slice compatible with binary.Read.
 func (c *Client) ReadTagElementsInto(ctx context.Context, tagName string, count uint16, dst any) error {
 	data, err := c.ReadTagElements(ctx, tagName, count)
 	if err != nil {
@@ -310,7 +327,9 @@ func (c *Client) ReadTagElementsInto(ctx context.Context, tagName string, count 
 	return cip.Unmarshal(data[hdrLen:], dst)
 }
 
-// ReadTimer reads a Timer tag from the PLC and decodes it.
+// ReadTimer reads a Rockwell Logix Timer tag (TON, TOF, or RTO) from the PLC
+// and decodes it into a [cip.Timer] struct containing preset, accumulated, and
+// status-bit fields.
 func (c *Client) ReadTimer(ctx context.Context, tagName string) (*cip.Timer, error) {
 	data, err := c.ReadTag(ctx, tagName)
 	if err != nil {
@@ -335,7 +354,8 @@ func (c *Client) ReadTimer(ctx context.Context, tagName string) (*cip.Timer, err
 
 // ---------- Discovery / Enumeration ----------
 
-// ListIdentity sends the ListIdentity command via the current session.
+// ListIdentity sends the EIP ListIdentity command via the current session and
+// returns the device identity items reported by the target.
 func (c *Client) ListIdentity(ctx context.Context) ([]eip.ListIdentityItem, error) {
 	var result []eip.ListIdentityItem
 	err := c.do(ctx, func(sess *Session) error {
@@ -349,7 +369,8 @@ func (c *Client) ListIdentity(ctx context.Context) ([]eip.ListIdentityItem, erro
 	return result, err
 }
 
-// ListServices sends the ListServices command via the current session.
+// ListServices sends the EIP ListServices command via the current session and
+// returns the communication services supported by the target.
 func (c *Client) ListServices(ctx context.Context) ([]eip.ListServicesItem, error) {
 	var result []eip.ListServicesItem
 	err := c.do(ctx, func(sess *Session) error {
@@ -363,9 +384,9 @@ func (c *Client) ListServices(ctx context.Context) ([]eip.ListServicesItem, erro
 	return result, err
 }
 
-// ListTags enumerates all tags on the PLC by iterating the Symbol Object.
-// The entire enumeration runs inside a single do() call so a mid-enumeration
-// connection drop retries from scratch.
+// ListTags enumerates all tags on the PLC by querying every instance of the
+// CIP Symbol Object (class 0x6B). The entire enumeration runs inside a single
+// retry scope so a mid-enumeration connection drop retries from scratch.
 func (c *Client) ListTags(ctx context.Context) ([]cip.SymbolInstance, error) {
 	var result []cip.SymbolInstance
 	err := c.do(ctx, func(sess *Session) error {
@@ -425,9 +446,9 @@ func (c *Client) ListTags(ctx context.Context) ([]cip.SymbolInstance, error) {
 
 // ---------- Generic helpers ----------
 
-// Read reads a single tag value from the PLC and returns it as type T.
-// T must be a fixed-size type compatible with binary.Read or implement
-// cip.Unmarshaler.
+// Read is a generic helper that reads a single tag value from the PLC and
+// returns it as type T. T must be a fixed-size type compatible with
+// binary.Read (e.g. int32, float64) or implement [cip.Unmarshaler].
 func Read[T any](c *Client, ctx context.Context, tagName string) (T, error) {
 	var zero T
 	data, err := c.ReadTag(ctx, tagName)
@@ -452,8 +473,9 @@ func Read[T any](c *Client, ctx context.Context, tagName string) (T, error) {
 	return result, nil
 }
 
-// ReadSlice reads count elements of a tag and returns them as []T.
-// T must be a fixed-size type compatible with binary.Read.
+// ReadSlice is a generic helper that reads count elements of a tag and returns
+// them as []T. T must be a fixed-size type compatible with binary.Read
+// (e.g. int32, float64).
 func ReadSlice[T any](c *Client, ctx context.Context, tagName string, count uint16) ([]T, error) {
 	data, err := c.ReadTagElements(ctx, tagName, count)
 	if err != nil {

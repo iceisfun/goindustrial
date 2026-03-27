@@ -1,3 +1,17 @@
+// Package assembly implements the CIP Assembly Object (Class 0x04) for
+// managing I/O data buffers in EtherNet/IP devices.
+//
+// In the Common Industrial Protocol (CIP), an Assembly Object groups
+// collections of attributes from other objects into a single, contiguous
+// block of data. Each assembly instance maps to a set of physical I/O
+// points or logical data. Scanners read and write these instances to
+// exchange process data with adapters during implicit (cyclic) I/O
+// messaging.
+//
+// A typical device exposes at least three assembly instances:
+//   - An Input assembly (data produced by the device, e.g. sensor readings)
+//   - An Output assembly (data consumed by the device, e.g. actuator commands)
+//   - A Configuration assembly (static parameters sent once at connection time)
 package assembly
 
 import (
@@ -7,19 +21,26 @@ import (
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/cip"
 )
 
-// AssemblyObject implements the CIP Assembly Object (Class 0x04)
+// AssemblyObject implements the CIP Assembly Object (Class 0x04).
+// It holds a set of assembly instances, each backed by a contiguous byte
+// buffer, and supports the Get_Attribute_Single and Set_Attribute_Single
+// services required for implicit I/O messaging. All methods are safe for
+// concurrent use.
 type AssemblyObject struct {
 	mu        sync.RWMutex
 	instances map[uint32]*AssemblyInstance
 }
 
-// AssemblyInstance represents a single assembly instance (Input, Output, or Config)
+// AssemblyInstance represents a single assembly instance such as an Input,
+// Output, or Configuration assembly. ID is the CIP instance number and Data
+// is the raw I/O buffer whose size is fixed at registration time.
 type AssemblyInstance struct {
 	ID   uint32
 	Data []byte
 }
 
-// NewAssemblyObject creates a new Assembly Object
+// NewAssemblyObject creates a new, empty AssemblyObject with no registered
+// instances. Use RegisterAssembly to add instances before starting I/O.
 func NewAssemblyObject() *AssemblyObject {
 	return &AssemblyObject{
 		instances: make(map[uint32]*AssemblyInstance),
@@ -33,7 +54,10 @@ func (ao *AssemblyObject) GetInstance(instanceID uint32) *AssemblyInstance {
 	return ao.instances[instanceID]
 }
 
-// RegisterAssembly registers a new assembly instance
+// RegisterAssembly registers a new assembly instance with the given ID and
+// initial data buffer. The length of data defines the fixed size of the
+// instance; subsequent Set_Attribute_Single calls must supply exactly this
+// many bytes.
 func (ao *AssemblyObject) RegisterAssembly(instanceID uint32, data []byte) {
 	ao.mu.Lock()
 	defer ao.mu.Unlock()
@@ -43,7 +67,9 @@ func (ao *AssemblyObject) RegisterAssembly(instanceID uint32, data []byte) {
 	}
 }
 
-// GetAttributeSingle handles Get_Attribute_Single (0x0E) service
+// GetAttributeSingle handles the CIP Get_Attribute_Single service (0x0E).
+// Attribute 3 (Data) returns a copy of the instance buffer. All other
+// attribute IDs return a cip.Error with StatusAttributeNotSupported.
 func (ao *AssemblyObject) GetAttributeSingle(instanceID uint32, attrID uint16) ([]byte, error) {
 	ao.mu.RLock()
 	defer ao.mu.RUnlock()
@@ -67,7 +93,10 @@ func (ao *AssemblyObject) GetAttributeSingle(instanceID uint32, attrID uint16) (
 	return nil, cip.Error{Status: cip.StatusAttributeNotSupported}
 }
 
-// SetAttributeSingle handles Set_Attribute_Single (0x10) service
+// SetAttributeSingle handles the CIP Set_Attribute_Single service (0x10).
+// Attribute 3 (Data) copies the provided bytes into the instance buffer.
+// The length of data must match the registered buffer size exactly;
+// otherwise a cip.Error with StatusInvalidAttributeValue is returned.
 func (ao *AssemblyObject) SetAttributeSingle(instanceID uint32, attrID uint16, data []byte) error {
 	ao.mu.Lock()
 	defer ao.mu.Unlock()
@@ -91,7 +120,12 @@ func (ao *AssemblyObject) SetAttributeSingle(instanceID uint32, attrID uint16, d
 	return cip.Error{Status: cip.StatusAttributeNotSupported}
 }
 
-// HandleRequest implements the cip.Object interface
+// HandleRequest implements the cip.Object interface. It decodes the CIP path
+// to extract the instance and attribute IDs, then dispatches to
+// GetAttributeSingle or SetAttributeSingle. The path is expected to contain
+// an instance segment (0x24 or 0x25) and optionally an attribute segment
+// (0x30 or 0x31); the class segment should already have been consumed by the
+// router.
 func (ao *AssemblyObject) HandleRequest(service cip.USINT, path cip.Path, data []byte) ([]byte, error) {
 	// Path should contain Instance ID
 	// Path format: [Instance Segment] [Attribute Segment?]

@@ -8,7 +8,7 @@ import (
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/cip"
 )
 
-// ConnMgrOption configures a ConnectionManager.
+// ConnMgrOption is a functional option for configuring a ConnectionManager.
 type ConnMgrOption func(*ConnectionManager)
 
 // WithOnOpen sets a callback invoked after a successful Forward_Open.
@@ -26,7 +26,10 @@ func WithOnClose(fn func(*Connection)) ConnMgrOption {
 	}
 }
 
-// ConnectionManager implements the CIP Connection Manager Object (Class 0x06)
+// ConnectionManager implements the CIP Connection Manager Object (Class 0x06).
+// It processes Forward Open and Forward Close requests, maintains a table of
+// active connections, and invokes optional callbacks when connections are
+// opened or closed. All methods are safe for concurrent use.
 type ConnectionManager struct {
 	mu          sync.RWMutex
 	connections map[uint32]*Connection
@@ -35,7 +38,9 @@ type ConnectionManager struct {
 	onClose     func(*Connection)
 }
 
-// Connection represents a logical CIP connection
+// Connection represents a logical CIP connection established via Forward Open.
+// It is identified by the connection triad (ConnectionSerialNumber, VendorID,
+// OriginatorSerialNumber) which is unique across all originators.
 type Connection struct {
 	OTConnectionID         uint32
 	TOConnectionID         uint32
@@ -44,7 +49,9 @@ type Connection struct {
 	OriginatorSerialNumber cip.UDINT
 }
 
-// NewConnectionManager creates a new Connection Manager
+// NewConnectionManager creates a new ConnectionManager with the supplied
+// options. Connection IDs are allocated starting at 0x80000000 to avoid
+// collisions with originator-assigned IDs.
 func NewConnectionManager(opts ...ConnMgrOption) *ConnectionManager {
 	cm := &ConnectionManager{
 		connections: make(map[uint32]*Connection),
@@ -56,7 +63,10 @@ func NewConnectionManager(opts ...ConnMgrOption) *ConnectionManager {
 	return cm
 }
 
-// HandleForwardOpen processes a Forward_Open request
+// HandleForwardOpen processes a Forward_Open request from its raw CIP service
+// data bytes. It deserializes the request, allocates a new target connection
+// ID, stores the connection, invokes the OnOpen callback (if set), and returns
+// the serialized ForwardOpenResponse.
 func (cm *ConnectionManager) HandleForwardOpen(reqData []byte) ([]byte, error) {
 	req := &ForwardOpenRequest{}
 	r := bytes.NewReader(reqData)
@@ -157,7 +167,11 @@ func (cm *ConnectionManager) HandleForwardOpen(reqData []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// HandleForwardClose processes a Forward_Close request
+// HandleForwardClose processes a Forward_Close request from its raw CIP
+// service data bytes. It locates the connection by its triad
+// (ConnectionSerialNumber, VendorID, OriginatorSerialNumber), removes it from
+// the active table, invokes the OnClose callback (if set), and returns the
+// serialized ForwardCloseResponse.
 func (cm *ConnectionManager) HandleForwardClose(reqData []byte) ([]byte, error) {
 	req := &ForwardCloseRequest{}
 	r := bytes.NewReader(reqData)
@@ -226,7 +240,9 @@ func (cm *ConnectionManager) HandleForwardClose(reqData []byte) ([]byte, error) 
 	return buf.Bytes(), nil
 }
 
-// HandleRequest implements the cip.Object interface
+// HandleRequest implements the cip.Object interface. It dispatches to
+// HandleForwardOpen or HandleForwardClose based on the service code.
+// Unsupported services return a cip.Error with StatusServiceNotSupported.
 func (cm *ConnectionManager) HandleRequest(service cip.USINT, path cip.Path, data []byte) ([]byte, error) {
 	switch service {
 	case ServiceForwardOpen:

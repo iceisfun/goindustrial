@@ -6,15 +6,18 @@ import (
 	"github.com/iceisfun/goindustrial/logging"
 )
 
-// SessionConnector creates new EIP sessions by dialing TCP and registering.
-// It implements transport.Connector[*Session].
+// SessionConnector creates new EtherNet/IP sessions by dialing TCP and
+// sending a RegisterSession command. It implements
+// transport.Connector[*Session] and is used internally by [Connect] and
+// [NewReconnectingClient].
 type SessionConnector struct {
 	address  string
 	logger   logging.Logger
 	connOpts []ConnOption
 }
 
-// NewSessionConnector creates a SessionConnector for the given address.
+// NewSessionConnector creates a SessionConnector that will dial the given
+// address. If logger is nil a no-op logger is used.
 func NewSessionConnector(address string, logger logging.Logger, connOpts ...ConnOption) *SessionConnector {
 	if logger == nil {
 		logger = logging.NewNopLogger()
@@ -26,7 +29,8 @@ func NewSessionConnector(address string, logger logging.Logger, connOpts ...Conn
 	}
 }
 
-// Connect dials TCP, creates a session, and registers it.
+// Connect dials TCP, creates a [Session], and sends RegisterSession to obtain
+// a session handle from the target device.
 func (c *SessionConnector) Connect(ctx context.Context) (*Session, error) {
 	tc, err := NewTCPConn(c.address, c.connOpts...)
 	if err != nil {
@@ -42,11 +46,12 @@ func (c *SessionConnector) Connect(ctx context.Context) (*Session, error) {
 	return s, nil
 }
 
-// SessionCloser tears down an EIP session by unregistering and closing the
-// underlying connection. It implements transport.Closer[*Session].
+// SessionCloser tears down an EtherNet/IP session by sending
+// UnregisterSession and closing the underlying TCP connection. It implements
+// transport.Closer[*Session].
 type SessionCloser struct{}
 
-// Close unregisters and closes the session.
+// Close sends UnregisterSession and closes the underlying TCP connection.
 func (c SessionCloser) Close(sess *Session) error {
 	// Use a background context since Close has no ctx parameter.
 	sess.Unregister(context.Background())

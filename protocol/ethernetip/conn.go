@@ -11,15 +11,18 @@ import (
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/eip"
 )
 
-// TCPConn implements EIP packet transport over TCP.
+// TCPConn implements EtherNet/IP encapsulation packet transport over a single
+// TCP connection. It serializes writes with an internal mutex so it is safe
+// for concurrent use.
 type TCPConn struct {
 	conn net.Conn
 	wmu  sync.Mutex // protects concurrent writes
 }
 
-// NewTCPConn creates a new TCP connection for EIP communication.
-// If no port is specified in the address, the default EIP port 44818 is appended.
-// Use WithConn to inject a pre-existing net.Conn (e.g., from net.Pipe) for testing.
+// NewTCPConn dials a TCP connection to the given address for EtherNet/IP
+// communication. If no port is specified in the address, the default EIP port
+// 44818 is appended. Use [WithConn] to inject a pre-existing net.Conn
+// (e.g. from net.Pipe) for testing.
 func NewTCPConn(address string, opts ...ConnOption) (*TCPConn, error) {
 	cfg := connConfig{
 		dialTimeout: 5 * time.Second,
@@ -44,7 +47,8 @@ func NewTCPConn(address string, opts ...ConnOption) (*TCPConn, error) {
 	return &TCPConn{conn: conn}, nil
 }
 
-// Send sends an EIP packet with the given command, data, and session handle.
+// Send writes a complete EIP encapsulation packet (24-byte header + data) to
+// the TCP connection using the given command code and session handle.
 func (t *TCPConn) Send(cmd eip.Command, data []byte, sessionHandle eip.SessionHandle) error {
 	header := eip.EncapsulationHeader{
 		Command:       cmd,
@@ -73,7 +77,8 @@ func (t *TCPConn) Send(cmd eip.Command, data []byte, sessionHandle eip.SessionHa
 	return nil
 }
 
-// Receive reads an EIP packet from the connection.
+// Receive reads a complete EIP encapsulation packet from the connection and
+// returns the parsed header and the command-specific data payload.
 func (t *TCPConn) Receive() (*eip.EncapsulationHeader, []byte, error) {
 	header := &eip.EncapsulationHeader{}
 	if err := header.Decode(t.conn); err != nil {

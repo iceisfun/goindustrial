@@ -1,3 +1,12 @@
+// Package transport provides generic connection lifecycle management for
+// industrial protocol clients. It defines the [Transport] interface for
+// obtaining, resetting, and closing protocol connections, along with two
+// built-in implementations: [DirectTransport] (connect once, fail on error)
+// and [ReconnectingTransport] (lazy connect with automatic reconnection).
+//
+// The package is parameterized on the connection type C so it can manage
+// any protocol session (e.g., a Modbus TCP framer or an EtherNet/IP session)
+// without importing protocol-specific packages.
 package transport
 
 import "context"
@@ -41,9 +50,11 @@ type Transport[C any] interface {
 // ConnectorFunc adapts a plain function into a Connector.
 type ConnectorFunc[C any] func(ctx context.Context) (C, error)
 
+// Connect calls the underlying function.
 func (f ConnectorFunc[C]) Connect(ctx context.Context) (C, error) { return f(ctx) }
 
 // CloserFunc adapts a plain function into a Closer.
 type CloserFunc[C any] func(conn C) error
 
+// Close calls the underlying function.
 func (f CloserFunc[C]) Close(conn C) error { return f(conn) }

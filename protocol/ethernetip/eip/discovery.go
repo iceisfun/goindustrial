@@ -6,7 +6,9 @@ import (
 	"io"
 )
 
-// ListIdentityItem represents an item in the ListIdentity response
+// ListIdentityItem represents a device identity returned by the EIP
+// ListIdentity command. It contains vendor ID, product name, revision,
+// serial number, and other identifying information.
 type ListIdentityItem struct {
 	TypeID        uint16
 	Length        uint16
@@ -22,7 +24,9 @@ type ListIdentityItem struct {
 	State         uint8
 }
 
-// ListServicesItem represents an item in the ListServices response
+// ListServicesItem represents a communication service advertised by the EIP
+// ListServices command. The CapabilityFlags indicate supported features such
+// as CIP encapsulation over TCP.
 type ListServicesItem struct {
 	TypeID          uint16
 	Length          uint16
@@ -31,8 +35,8 @@ type ListServicesItem struct {
 	Name            string // 16 bytes fixed
 }
 
-// EncodeListIdentityResponse encodes a list of identity items into the
-// response data format for a CommandListIdentity reply.
+// EncodeListIdentityResponse encodes a slice of identity items into the wire
+// format for a [CommandListIdentity] response.
 func EncodeListIdentityResponse(items []ListIdentityItem) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	binary.Write(buf, binary.LittleEndian, uint16(len(items)))
@@ -63,8 +67,8 @@ func EncodeListIdentityResponse(items []ListIdentityItem) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// EncodeListServicesResponse encodes a list of service items into the
-// response data format for a CommandListServices reply.
+// EncodeListServicesResponse encodes a slice of service items into the wire
+// format for a [CommandListServices] response.
 func EncodeListServicesResponse(items []ListServicesItem) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	binary.Write(buf, binary.LittleEndian, uint16(len(items)))
@@ -80,7 +84,7 @@ func EncodeListServicesResponse(items []ListServicesItem) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// DecodeListServicesItem decodes a single service item
+// DecodeListServicesItem decodes a single [ListServicesItem] from the reader.
 func DecodeListServicesItem(r io.Reader) (*ListServicesItem, error) {
 	item := &ListServicesItem{}
 	if err := binary.Read(r, binary.LittleEndian, &item.TypeID); err != nil {
@@ -106,7 +110,8 @@ func DecodeListServicesItem(r io.Reader) (*ListServicesItem, error) {
 	return item, nil
 }
 
-// DecodeListIdentityResponse decodes the full response data from ListIdentity
+// DecodeListIdentityResponse decodes the full response data from a
+// [CommandListIdentity] reply into a slice of [ListIdentityItem] values.
 func DecodeListIdentityResponse(data []byte) ([]ListIdentityItem, error) {
 	r := bytes.NewReader(data)
 	var count uint16
@@ -184,7 +189,8 @@ func DecodeListIdentityResponse(data []byte) ([]ListIdentityItem, error) {
 	return items, nil
 }
 
-// DecodeListServicesResponse decodes the full response data from ListServices
+// DecodeListServicesResponse decodes the full response data from a
+// [CommandListServices] reply into a slice of [ListServicesItem] values.
 func DecodeListServicesResponse(data []byte) ([]ListServicesItem, error) {
 	r := bytes.NewReader(data)
 	var count uint16

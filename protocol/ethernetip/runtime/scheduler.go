@@ -16,14 +16,19 @@ type connSnapshot struct {
 	AssemblyData  []byte
 }
 
-// Scheduler manages the RPI (Requested Packet Interval) for producing connections
+// Scheduler drives the production side of implicit I/O messaging. It polls
+// all producer connections registered with a Runtime, and when a connection's
+// Requested Packet Interval (RPI) has elapsed it reads the assembly data and
+// sends a UDP packet to the remote scanner. The scheduler runs in its own
+// goroutine; call Start to launch it and Stop to shut it down.
 type Scheduler struct {
 	runtime  *Runtime
 	stop     chan struct{}
 	stopOnce sync.Once
 }
 
-// NewScheduler creates a new Scheduler
+// NewScheduler creates a new Scheduler bound to the given Runtime. The
+// scheduler is not started until Start is called.
 func NewScheduler(r *Runtime) *Scheduler {
 	return &Scheduler{
 		runtime: r,
@@ -31,12 +36,14 @@ func NewScheduler(r *Runtime) *Scheduler {
 	}
 }
 
-// Start starts the scheduler loop
+// Start launches the scheduler goroutine, which checks producer connections
+// every 5 ms and sends I/O packets when each connection's RPI has elapsed.
 func (s *Scheduler) Start() {
 	go s.run()
 }
 
-// Stop stops the scheduler
+// Stop signals the scheduler goroutine to exit. It is safe to call multiple
+// times.
 func (s *Scheduler) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stop)

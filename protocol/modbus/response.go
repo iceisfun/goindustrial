@@ -6,8 +6,10 @@ import (
 	"io"
 )
 
-// Response represents a Modbus TCP response with MBAP header and PDU.
-// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 4.1 (MBAP Header format)
+// Response represents a Modbus TCP response. It carries the MBAP header fields
+// (transaction ID, protocol ID, unit ID) and a [PDU] containing the function
+// code and response-specific data. If the server replied with an exception, the
+// function code will have its high bit set.
 type Response struct {
 	TransactionID TransactionID
 	ProtocolID    ProtocolID
@@ -15,7 +17,7 @@ type Response struct {
 	PDU           *PDU
 }
 
-// NewResponse creates a new Response.
+// NewResponse creates a new Response with the given MBAP fields and PDU data.
 func NewResponse(transactionID TransactionID, unitID UnitID, functionCode FunctionCode, data []byte) *Response {
 	return &Response{
 		TransactionID: transactionID,
@@ -43,8 +45,8 @@ func (r *Response) GetPDU() *PDU {
 	return r.PDU
 }
 
-// Encode encodes a Response into bytes (MBAP header + PDU, big-endian).
-// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 4.1 (MBAP Header format)
+// Encode serialises the Response into a Modbus TCP frame (MBAP header + PDU)
+// with big-endian byte order, ready to be written to a TCP connection.
 func (r *Response) Encode() ([]byte, error) {
 	// Length field = Unit ID (1 byte) + Function Code (1 byte) + Data (N bytes)
 	length := uint16(1 + 1 + len(r.PDU.Data))
@@ -76,8 +78,8 @@ func (r *Response) Encode() ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-// Decode decodes a Response from bytes.
-// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 4.1 (MBAP Header) and Section 6 (PDU format)
+// Decode deserialises a Modbus TCP frame (MBAP header + PDU) from the given
+// byte slice and populates the Response fields.
 func (r *Response) Decode(data []byte) error {
 	if len(data) < TCPHeaderLength {
 		return ErrInvalidResponseLength
@@ -126,14 +128,14 @@ func (r *Response) Decode(data []byte) error {
 	return nil
 }
 
-// IsException checks if the response is an exception.
-// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 7 (Exception Responses)
+// IsException reports whether the response is a Modbus exception (i.e. the high
+// bit of the function code is set).
 func (r *Response) IsException() bool {
 	return IsFunctionException(r.PDU.FunctionCode)
 }
 
-// GetException returns the exception code if the response is an exception.
-// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 7 (Exception Responses)
+// GetException returns the [ExceptionCode] if the response is an exception, or
+// 0 if it is a normal response.
 func (r *Response) GetException() ExceptionCode {
 	if r.IsException() && len(r.PDU.Data) > 0 {
 		return ExceptionCode(r.PDU.Data[0])
@@ -141,8 +143,8 @@ func (r *Response) GetException() ExceptionCode {
 	return 0
 }
 
-// ToError converts an exception response to an error.
-// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 7 (Exception Responses)
+// ToError converts an exception response to a [ModbusError]. If the response is
+// not an exception, nil is returned.
 func (r *Response) ToError() error {
 	if r.IsException() {
 		return NewModbusError(r.PDU.FunctionCode, r.GetException())

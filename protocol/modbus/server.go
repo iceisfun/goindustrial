@@ -15,9 +15,11 @@ import (
 	"github.com/iceisfun/goindustrial/logging"
 )
 
-// Server implements a Modbus TCP server.
-// It supports standard TCP listeners as well as any net.Listener (including
-// those backed by net.Pipe for in-process testing).
+// Server implements a Modbus TCP server that accepts client connections and
+// dispatches incoming requests to registered [HandlerFunc] callbacks. It
+// supports standard TCP listeners as well as any net.Listener (including those
+// backed by net.Pipe for in-process testing). By default, handlers for all
+// standard function codes are wired to the server's [DataStore].
 type Server struct {
 	// Server binding configuration
 	address  string
@@ -52,10 +54,11 @@ type Server struct {
 	injectedConn net.Conn
 }
 
-// ServerOption is a function type for configuring a Server.
+// ServerOption is a functional option for configuring a [Server]. Pass
+// ServerOption values to [NewServer].
 type ServerOption func(*Server)
 
-// WithServerPort sets the TCP port for the server.
+// WithServerPort sets the TCP port for the server. The default is 502.
 func WithServerPort(port int) ServerOption {
 	return func(s *Server) {
 		s.port = port
@@ -69,7 +72,8 @@ func WithServerLogger(logger logging.Logger) ServerOption {
 	}
 }
 
-// WithServerDataStore sets the data store for the server.
+// WithServerDataStore sets the [DataStore] that backs the default function-code
+// handlers. The default is a [MemoryStore].
 func WithServerDataStore(store DataStore) ServerOption {
 	return func(s *Server) {
 		s.defaultStore = store
@@ -120,7 +124,8 @@ func WithOnClientDisconnect(fn func(ConnectedClient)) ServerOption {
 	}
 }
 
-// NewServer creates a new Modbus TCP server.
+// NewServer creates a new Modbus TCP server bound to the given address (e.g.
+// "0.0.0.0" or ""). The server is not started until [Server.Start] is called.
 func NewServer(address string, options ...ServerOption) *Server {
 	server := &Server{
 		address:      address,
@@ -194,14 +199,19 @@ func (s *Server) setupDefaultHandlers() {
 	})
 }
 
-// SetHandler sets the handler for a specific Modbus function code.
+// SetHandler registers a [HandlerFunc] for a specific Modbus function code,
+// replacing any existing handler. This allows custom processing of standard or
+// vendor-specific function codes.
 func (s *Server) SetHandler(functionCode FunctionCode, handler HandlerFunc) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.handlers[functionCode] = handler
 }
 
-// Start starts the server.
+// Start begins accepting client connections. If no listener was provided via
+// [WithServerListener], a TCP listener is created on the configured address and
+// port. The method returns immediately; connection handling runs in background
+// goroutines.
 func (s *Server) Start(ctx context.Context) error {
 	s.mutex.Lock()
 	if s.running {
@@ -265,7 +275,8 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the server.
+// Stop gracefully shuts down the server by closing the listener and all active
+// client connections.
 func (s *Server) Stop(ctx context.Context) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -304,7 +315,8 @@ func (s *Server) IsRunning() bool {
 	return s.running
 }
 
-// ConnectedClients returns a snapshot of all currently connected clients.
+// ConnectedClients returns a snapshot of all currently connected clients,
+// including per-client transaction counts and function code statistics.
 func (s *Server) ConnectedClients() []ConnectedClient {
 	s.clientsMutex.RLock()
 	defer s.clientsMutex.RUnlock()
@@ -565,8 +577,8 @@ type clientConn struct {
 	fcCount     [256]atomic.Uint64
 }
 
-// ConnectedClient is a snapshot of a connected client's state.
-// Returned by Server.ConnectedClients(). Safe to copy and store.
+// ConnectedClient is a read-only snapshot of a connected client's state,
+// returned by [Server.ConnectedClients]. It is safe to copy and store.
 type ConnectedClient struct {
 	RemoteAddr        string
 	ConnectedAt       time.Time

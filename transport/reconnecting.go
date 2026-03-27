@@ -31,6 +31,9 @@ func NewReconnectingTransport[C comparable](connector Connector[C], closer Close
 	}
 }
 
+// Conn returns the current connection, creating a new one via the Connector
+// if none exists. Concurrent callers share the fast read-lock path when a
+// connection is already established.
 func (r *ReconnectingTransport[C]) Conn(ctx context.Context) (C, error) {
 	// Fast path: read lock
 	r.mu.RLock()
@@ -70,6 +73,9 @@ func (r *ReconnectingTransport[C]) Conn(ctx context.Context) (C, error) {
 	return conn, nil
 }
 
+// Reset invalidates the connection if it matches stale, closing the
+// underlying session. The next Conn call will transparently establish a
+// new connection.
 func (r *ReconnectingTransport[C]) Reset(stale C) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -88,6 +94,8 @@ func (r *ReconnectingTransport[C]) Reset(stale C) error {
 	return nil
 }
 
+// Close permanently shuts down the transport and closes any active
+// connection. It is safe to call multiple times.
 func (r *ReconnectingTransport[C]) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -15,7 +15,9 @@ import (
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/objects/connmgr"
 )
 
-// IOConnectionConfig describes the parameters for an implicit I/O connection.
+// IOConnectionConfig describes the parameters for establishing an implicit I/O
+// connection via CIP Forward_Open. Implicit connections exchange assembly data
+// cyclically over UDP at the Requested Packet Interval (RPI).
 type IOConnectionConfig struct {
 	// OTConnectionPoint is the target assembly instance for O→T data.
 	OTConnectionPoint uint16
@@ -51,33 +53,36 @@ type IOConnectionConfig struct {
 	ConnectionPath []byte
 }
 
-// IOScannerOption configures an IOScanner.
+// IOScannerOption configures an [IOScanner].
 type IOScannerOption func(*IOScanner)
 
-// WithIOLogger sets the logger for the scanner.
+// WithIOLogger sets the logger for the I/O scanner.
 func WithIOLogger(l logging.Logger) IOScannerOption {
 	return func(s *IOScanner) {
 		s.logger = l
 	}
 }
 
-// WithVendorID sets the originator vendor ID for Forward_Open requests.
+// WithVendorID sets the originator vendor ID included in CIP Forward_Open
+// requests. The default is 1.
 func WithVendorID(id uint16) IOScannerOption {
 	return func(s *IOScanner) {
 		s.vendorID = id
 	}
 }
 
-// WithOriginatorSerial sets the originator serial number.
+// WithOriginatorSerial sets the originator serial number included in CIP
+// Forward_Open requests. The default is 1.
 func WithOriginatorSerial(sn uint32) IOScannerOption {
 	return func(s *IOScanner) {
 		s.originatorSN = sn
 	}
 }
 
-// IOScanner manages implicit I/O connections over EtherNet/IP. It uses a TCP
-// Session for control-plane operations (Forward_Open/Close) and a UDP socket
-// for cyclic I/O data exchange.
+// IOScanner manages implicit (cyclic) I/O connections over EtherNet/IP. It
+// uses a TCP [Session] for control-plane operations (CIP Forward_Open and
+// Forward_Close) and a local UDP socket for producing and consuming assembly
+// data at the negotiated Requested Packet Interval.
 type IOScanner struct {
 	session      *Session
 	udpConn      *net.UDPConn
@@ -94,9 +99,11 @@ type IOScanner struct {
 	wg   sync.WaitGroup
 }
 
-// IOConn represents an active implicit I/O connection. Data is exchanged
-// cyclically at the negotiated RPI. Use SetOutput to update the O→T assembly
-// and Input to read the latest T→O assembly data.
+// IOConn represents an active implicit I/O connection established by
+// [IOScanner.Open]. Assembly data is exchanged cyclically over UDP at the
+// negotiated RPI. Use [IOConn.SetOutput] to update the Originator-to-Target
+// (O-T) assembly and [IOConn.Input] to read the latest Target-to-Originator
+// (T-O) assembly data.
 type IOConn struct {
 	// Connection identifiers (read-only after creation).
 	OTConnectionID         uint32
@@ -124,9 +131,10 @@ type IOConn struct {
 	stopMu  sync.Once
 }
 
-// NewIOScanner creates an I/O scanner that uses the given TCP session for
-// Forward_Open/Close and binds a UDP socket to localUDPAddr for cyclic data.
-// Pass ":0" as localUDPAddr to use an ephemeral port.
+// NewIOScanner creates an I/O scanner that uses the given TCP [Session] for
+// CIP Forward_Open/Close and binds a UDP socket to localUDPAddr for cyclic
+// data exchange. Pass ":0" as localUDPAddr to let the OS choose an ephemeral
+// port. A background goroutine is started to receive incoming T-O packets.
 func NewIOScanner(session *Session, localUDPAddr string, opts ...IOScannerOption) (*IOScanner, error) {
 	addr, err := net.ResolveUDPAddr("udp", localUDPAddr)
 	if err != nil {
@@ -160,8 +168,9 @@ func NewIOScanner(session *Session, localUDPAddr string, opts ...IOScannerOption
 	return s, nil
 }
 
-// Open establishes an implicit I/O connection by sending Forward_Open over
-// TCP and starting cyclic UDP data exchange at the negotiated RPI.
+// Open establishes an implicit I/O connection by sending a CIP Forward_Open
+// request over TCP and, on success, starting a background goroutine that
+// produces O-T assembly data over UDP at the negotiated RPI.
 func (s *IOScanner) Open(ctx context.Context, cfg IOConnectionConfig) (*IOConn, error) {
 	otConnID := s.nextOTID.Add(1)
 	serial := cip.UINT(s.nextSerial.Add(1))
@@ -285,7 +294,8 @@ func (s *IOScanner) Open(ctx context.Context, cfg IOConnectionConfig) (*IOConn, 
 	return conn, nil
 }
 
-// Close sends Forward_Close for the given connection and stops its producer.
+// Close sends a CIP Forward_Close for the given connection and stops its
+// cyclic output producer goroutine.
 func (s *IOScanner) Close(ctx context.Context, conn *IOConn) error {
 	conn.stopMu.Do(func() { close(conn.stopCh) })
 
@@ -332,7 +342,8 @@ func (s *IOScanner) Close(ctx context.Context, conn *IOConn) error {
 	return nil
 }
 
-// Shutdown closes all active connections and stops the scanner.
+// Shutdown sends Forward_Close for every active connection, closes the UDP
+// socket, and waits for all background goroutines to exit.
 func (s *IOScanner) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	conns := make([]*IOConn, 0, len(s.connections))
@@ -355,8 +366,8 @@ func (s *IOScanner) Shutdown(ctx context.Context) error {
 	return firstErr
 }
 
-// SetOutput updates the O→T assembly data sent to the target each cycle.
-// The data must match the configured OTSize.
+// SetOutput updates the Originator-to-Target assembly data sent to the remote
+// device each cycle. The length of data must match the configured OTSize.
 func (c *IOConn) SetOutput(data []byte) error {
 	c.outputMu.Lock()
 	defer c.outputMu.Unlock()
@@ -367,7 +378,7 @@ func (c *IOConn) SetOutput(data []byte) error {
 	return nil
 }
 
-// Output returns a copy of the current output assembly.
+// Output returns a copy of the current Originator-to-Target assembly data.
 func (c *IOConn) Output() []byte {
 	c.outputMu.RLock()
 	defer c.outputMu.RUnlock()
@@ -376,7 +387,8 @@ func (c *IOConn) Output() []byte {
 	return out
 }
 
-// Input returns a copy of the last received T→O assembly data.
+// Input returns a copy of the most recently received Target-to-Originator
+// assembly data.
 func (c *IOConn) Input() []byte {
 	c.inputMu.RLock()
 	defer c.inputMu.RUnlock()
@@ -385,7 +397,7 @@ func (c *IOConn) Input() []byte {
 	return out
 }
 
-// InputAge returns the time elapsed since the last received packet.
+// InputAge returns the time elapsed since the last T-O packet was received.
 func (c *IOConn) InputAge() time.Duration {
 	if t, ok := c.lastReceive.Load().(time.Time); ok {
 		return time.Since(t)
@@ -393,8 +405,8 @@ func (c *IOConn) InputAge() time.Duration {
 	return 0
 }
 
-// IsTimedOut returns true if no packet has been received within the
-// watchdog timeout (RPI * (4 << TimeoutMultiplier)).
+// IsTimedOut returns true if no T-O packet has been received within the CIP
+// connection watchdog timeout, calculated as RPI * (4 << TimeoutMultiplier).
 func (c *IOConn) IsTimedOut() bool {
 	mult := uint64(4) << c.timeoutMult
 	timeout := c.RPI * time.Duration(mult)

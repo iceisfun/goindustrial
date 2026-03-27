@@ -5,14 +5,18 @@ import (
 	"encoding/binary"
 )
 
-// MessageRouterRequest represents a request to the Message Router Object
+// MessageRouterRequest represents a CIP Message Router request. It carries a
+// service code, the EPATH to the target object, and optional request data.
+// The Message Router (class 0x02) dispatches the request to the addressed
+// object.
 type MessageRouterRequest struct {
 	Service     USINT
 	RequestPath Path
 	RequestData []byte
 }
 
-// Encode encodes the request into a byte slice
+// Encode serializes the request into the CIP wire format:
+// [Service:1][PathSizeWords:1][Path...][RequestData...].
 func (r *MessageRouterRequest) Encode() ([]byte, error) {
 	buf := new(bytes.Buffer)
 	if err := binary.Write(buf, binary.LittleEndian, r.Service); err != nil {
@@ -33,7 +37,7 @@ func (r *MessageRouterRequest) Encode() ([]byte, error) {
 }
 
 // DecodeMessageRouterRequest decodes a byte slice into a MessageRouterRequest.
-// This is the inverse of Encode: [Service:1][PathSizeWords:1][Path...][RequestData...].
+// The expected wire format is [Service:1][PathSizeWords:1][Path...][RequestData...].
 func DecodeMessageRouterRequest(data []byte) (*MessageRouterRequest, error) {
 	r := &MessageRouterRequest{}
 	buf := bytes.NewReader(data)
@@ -62,7 +66,10 @@ func DecodeMessageRouterRequest(data []byte) (*MessageRouterRequest, error) {
 	return r, nil
 }
 
-// MessageRouterResponse represents a response from the Message Router Object
+// MessageRouterResponse represents a CIP Message Router response. The Service
+// field echoes the request service code with bit 7 set (OR 0x80).
+// GeneralStatus indicates success (0x00) or an error code, and ExtStatus
+// carries optional additional detail.
 type MessageRouterResponse struct {
 	Service       USINT // Reply Service (Request Service | 0x80)
 	Reserved      USINT
@@ -72,7 +79,7 @@ type MessageRouterResponse struct {
 	ResponseData  []byte
 }
 
-// Encode encodes the response into a byte slice.
+// Encode serializes the response into the CIP wire format.
 func (r *MessageRouterResponse) Encode() ([]byte, error) {
 	buf := new(bytes.Buffer)
 	binary.Write(buf, binary.LittleEndian, r.Service)
@@ -86,7 +93,7 @@ func (r *MessageRouterResponse) Encode() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// DecodeMessageRouterResponse decodes a byte slice into a MessageRouterResponse
+// DecodeMessageRouterResponse decodes a byte slice into a MessageRouterResponse.
 func DecodeMessageRouterResponse(data []byte) (*MessageRouterResponse, error) {
 	r := &MessageRouterResponse{}
 	buf := bytes.NewReader(data)
@@ -125,12 +132,13 @@ func DecodeMessageRouterResponse(data []byte) (*MessageRouterResponse, error) {
 	return r, nil
 }
 
-// IsSuccess checks if the response indicates success
+// IsSuccess returns true if the GeneralStatus is [StatusSuccess] (0x00).
 func (r *MessageRouterResponse) IsSuccess() bool {
 	return r.GeneralStatus == StatusSuccess
 }
 
-// Error returns a structured error if the response failed
+// Error returns a structured [Error] if the response indicates failure, or nil
+// on success.
 func (r *MessageRouterResponse) Error() error {
 	if r.IsSuccess() {
 		return nil
