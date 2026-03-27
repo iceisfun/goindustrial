@@ -8,11 +8,31 @@ import (
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/cip"
 )
 
+// ConnMgrOption configures a ConnectionManager.
+type ConnMgrOption func(*ConnectionManager)
+
+// WithOnOpen sets a callback invoked after a successful Forward_Open.
+// The callback receives the new Connection and the parsed request.
+func WithOnOpen(fn func(*Connection, *ForwardOpenRequest)) ConnMgrOption {
+	return func(cm *ConnectionManager) {
+		cm.onOpen = fn
+	}
+}
+
+// WithOnClose sets a callback invoked after a successful Forward_Close.
+func WithOnClose(fn func(*Connection)) ConnMgrOption {
+	return func(cm *ConnectionManager) {
+		cm.onClose = fn
+	}
+}
+
 // ConnectionManager implements the CIP Connection Manager Object (Class 0x06)
 type ConnectionManager struct {
 	mu          sync.RWMutex
-	connections map[uint32]*Connection // Map of ConnectionID -> Connection
+	connections map[uint32]*Connection
 	nextConnID  uint32
+	onOpen      func(*Connection, *ForwardOpenRequest)
+	onClose     func(*Connection)
 }
 
 // Connection represents a logical CIP connection
@@ -25,11 +45,15 @@ type Connection struct {
 }
 
 // NewConnectionManager creates a new Connection Manager
-func NewConnectionManager() *ConnectionManager {
-	return &ConnectionManager{
+func NewConnectionManager(opts ...ConnMgrOption) *ConnectionManager {
+	cm := &ConnectionManager{
 		connections: make(map[uint32]*Connection),
 		nextConnID:  0x80000000,
 	}
+	for _, opt := range opts {
+		opt(cm)
+	}
+	return cm
 }
 
 // HandleForwardOpen processes a Forward_Open request
@@ -90,8 +114,6 @@ func (cm *ConnectionManager) HandleForwardOpen(reqData []byte) ([]byte, error) {
 	}
 
 	cm.mu.Lock()
-	defer cm.mu.Unlock()
-
 	cm.nextConnID++
 	myConnID := cm.nextConnID
 
@@ -103,6 +125,11 @@ func (cm *ConnectionManager) HandleForwardOpen(reqData []byte) ([]byte, error) {
 		OriginatorSerialNumber: req.OriginatorSerialNumber,
 	}
 	cm.connections[myConnID] = conn
+	cm.mu.Unlock()
+
+	if cm.onOpen != nil {
+		cm.onOpen(conn, req)
+	}
 
 	resp := &ForwardOpenResponse{
 		OTConnectionID:         cip.UDINT(req.OTConnectionID),
@@ -164,16 +191,22 @@ func (cm *ConnectionManager) HandleForwardClose(reqData []byte) ([]byte, error) 
 	}
 
 	// Find and remove connection by triad
+	var closed *Connection
 	cm.mu.Lock()
 	for id, conn := range cm.connections {
 		if conn.ConnectionSerialNumber == req.ConnectionSerialNumber &&
 			conn.VendorID == req.VendorID &&
 			conn.OriginatorSerialNumber == req.OriginatorSerialNumber {
+			closed = conn
 			delete(cm.connections, id)
 			break
 		}
 	}
 	cm.mu.Unlock()
+
+	if closed != nil && cm.onClose != nil {
+		cm.onClose(closed)
+	}
 
 	resp := &ForwardCloseResponse{
 		ConnectionSerialNumber: req.ConnectionSerialNumber,

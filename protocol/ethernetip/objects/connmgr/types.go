@@ -1,6 +1,9 @@
 package connmgr
 
 import (
+	"bytes"
+	"encoding/binary"
+
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/cip"
 )
 
@@ -80,6 +83,59 @@ type ForwardCloseResponse struct {
 	ApplicationReplySize   cip.USINT
 	Reserved               cip.USINT
 	ApplicationReply       []byte
+}
+
+// ConnectionSizeFromParams extracts the connection size (bytes) from a 16-bit
+// network connection parameter word. The size is encoded in bits 0-8.
+func ConnectionSizeFromParams(params cip.WORD) uint16 {
+	return uint16(params & 0x01FF)
+}
+
+// Network connection parameter flags for building Forward_Open requests.
+const (
+	ConnParamFixedSize      cip.WORD = 0x0000
+	ConnParamVariableSize   cip.WORD = 0x0200
+	ConnParamPointToPoint   cip.WORD = 0x4000
+	ConnParamMulticast      cip.WORD = 0x2000
+	ConnParamPriorityLow    cip.WORD = 0x0000
+	ConnParamPriorityHigh   cip.WORD = 0x0400
+	ConnParamPriorityScheduled cip.WORD = 0x0800
+)
+
+// Encode serializes the ForwardOpenRequest to bytes.
+func (r *ForwardOpenRequest) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.LittleEndian, r.PriorityTimeTick)
+	binary.Write(buf, binary.LittleEndian, r.TimeoutTicks)
+	binary.Write(buf, binary.LittleEndian, r.OTConnectionID)
+	binary.Write(buf, binary.LittleEndian, r.TOConnectionID)
+	binary.Write(buf, binary.LittleEndian, r.ConnectionSerialNumber)
+	binary.Write(buf, binary.LittleEndian, r.VendorID)
+	binary.Write(buf, binary.LittleEndian, r.OriginatorSerialNumber)
+	binary.Write(buf, binary.LittleEndian, r.ConnectionTimeoutMultiplier)
+	binary.Write(buf, binary.LittleEndian, r.Reserved)
+	binary.Write(buf, binary.LittleEndian, r.OTRPI)
+	binary.Write(buf, binary.LittleEndian, r.OTNetworkConnectionParams)
+	binary.Write(buf, binary.LittleEndian, r.TORPI)
+	binary.Write(buf, binary.LittleEndian, r.TONetworkConnectionParams)
+	binary.Write(buf, binary.LittleEndian, r.TransportTypeTrigger)
+	binary.Write(buf, binary.LittleEndian, cip.USINT(len(r.ConnectionPath)/2))
+	buf.Write(r.ConnectionPath)
+	return buf.Bytes(), nil
+}
+
+// Encode serializes the ForwardCloseRequest to bytes.
+func (r *ForwardCloseRequest) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.LittleEndian, r.PriorityTimeTick)
+	binary.Write(buf, binary.LittleEndian, r.TimeoutTicks)
+	binary.Write(buf, binary.LittleEndian, r.ConnectionSerialNumber)
+	binary.Write(buf, binary.LittleEndian, r.VendorID)
+	binary.Write(buf, binary.LittleEndian, r.OriginatorSerialNumber)
+	binary.Write(buf, binary.LittleEndian, cip.USINT(len(r.ConnectionPath)/2))
+	binary.Write(buf, binary.LittleEndian, r.Reserved)
+	buf.Write(r.ConnectionPath)
+	return buf.Bytes(), nil
 }
 
 // LargeForwardOpenRequest represents the data for a Large_Forward_Open service
