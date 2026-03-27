@@ -19,9 +19,9 @@
 //
 // Usage:
 //
-//	go run . -addr 10.0.10.70
+//	go run . -addr 192.168.1.20
 //	go run . -addr 192.168.1.10:44818 -poll 50 -cycles 500
-//	go run . -addr 10.0.10.70 -script my_conditions.lua
+//	go run . -addr 192.168.1.20 -script my_conditions.lua
 package main
 
 import (

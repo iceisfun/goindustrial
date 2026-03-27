@@ -28,7 +28,7 @@
 // Usage:
 //
 //	go run . -modbus-addr 127.0.0.1 -modbus-port 5020
-//	go run . -modbus-addr 10.2.150.23 -modbus-port 502 -interval 500ms
+//	go run . -modbus-addr 192.168.1.10 -modbus-port 502 -interval 500ms
 package main
 
 import (

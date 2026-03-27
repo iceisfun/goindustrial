@@ -12,7 +12,7 @@
 //
 // Usage:
 //
-//	go run . -addr 10.0.10.70
+//	go run . -addr 192.168.1.20
 //	go run . -addr 192.168.1.10:44818 -script my_script.lua
 package main
 

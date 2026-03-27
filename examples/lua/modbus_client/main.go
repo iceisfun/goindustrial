@@ -12,7 +12,7 @@
 //
 // Usage:
 //
-//	go run . -addr 10.2.150.23 -port 502
+//	go run . -addr 192.168.1.10 -port 502
 //	go run . -addr 127.0.0.1 -port 5020
 package main
 

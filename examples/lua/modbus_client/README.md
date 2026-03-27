@@ -46,7 +46,7 @@ The Go host (`main.go`) performs five steps:
 Connect to a Modbus TCP server at a known address and port:
 
 ```
-go run ./examples/lua/modbus_client/ -addr 10.2.150.23 -port 502
+go run ./examples/lua/modbus_client/ -addr 192.168.1.10 -port 502
 ```
 
 Connect to a local simulator on a non-standard port:
@@ -58,7 +58,7 @@ go run ./examples/lua/modbus_client/ -addr 127.0.0.1 -port 5020
 Run a custom Lua script instead of the built-in demo:
 
 ```
-go run ./examples/lua/modbus_client/ -addr 10.2.150.23 -port 502 -script my_registers.lua
+go run ./examples/lua/modbus_client/ -addr 192.168.1.10 -port 502 -script my_registers.lua
 ```
 
 ### Flags
@@ -212,7 +212,7 @@ want your script to handle errors gracefully rather than terminating.
 The built-in demo script produces output similar to:
 
 ```
-Connected to Modbus server at 10.2.150.23:502
+Connected to Modbus server at 192.168.1.10:502
 ------------------------------------------------------------
 
 [1] Reading 10 holding registers from address 0:
@@ -275,5 +275,5 @@ client:close()
 Run it:
 
 ```
-go run ./examples/lua/modbus_client/ -addr 10.2.150.23 -port 502 -script my_registers.lua
+go run ./examples/lua/modbus_client/ -addr 192.168.1.10 -port 502 -script my_registers.lua
 ```

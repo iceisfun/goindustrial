@@ -48,19 +48,19 @@ The built-in Lua script then:
 Monitor tags on a PLC for 5 cycles (the default):
 
 ```
-go run ./examples/lua/monitor_tags/ -addr 10.0.10.70
+go run ./examples/lua/monitor_tags/ -addr 192.168.1.20
 ```
 
 Specify a different number of poll cycles:
 
 ```
-go run ./examples/lua/monitor_tags/ -addr 10.0.10.70 -cycles 20
+go run ./examples/lua/monitor_tags/ -addr 192.168.1.20 -cycles 20
 ```
 
 Run a custom monitoring script:
 
 ```
-go run ./examples/lua/monitor_tags/ -addr 10.0.10.70 -script custom_monitor.lua
+go run ./examples/lua/monitor_tags/ -addr 192.168.1.20 -script custom_monitor.lua
 ```
 
 ### Flags
@@ -147,7 +147,7 @@ your monitoring script.
 The built-in script produces output similar to:
 
 ```
-Connected to 10.0.10.70
+Connected to 192.168.1.20
 Monitoring 3 tags for 5 cycles:
   [1] Program:MainProgram.RunCount
   [2] Program:MainProgram.MotorSpeed
@@ -223,7 +223,7 @@ client:close()
 Run it:
 
 ```
-go run ./examples/lua/monitor_tags/ -addr 10.0.10.70 -cycles 100 -script custom_monitor.lua
+go run ./examples/lua/monitor_tags/ -addr 192.168.1.20 -cycles 100 -script custom_monitor.lua
 ```
 
 This script only prints output when a value changes, which is useful for

@@ -48,7 +48,7 @@ The Go host (`main.go`) performs five steps:
 Connect to a Logix PLC:
 
 ```
-go run ./examples/lua/ethernetip_client/ -addr 10.0.10.70
+go run ./examples/lua/ethernetip_client/ -addr 192.168.1.20
 ```
 
 Specify a non-default port (the EtherNet/IP default is 44818):
@@ -60,7 +60,7 @@ go run ./examples/lua/ethernetip_client/ -addr 192.168.1.10:44818
 Run a custom Lua script:
 
 ```
-go run ./examples/lua/ethernetip_client/ -addr 10.0.10.70 -script my_tags.lua
+go run ./examples/lua/ethernetip_client/ -addr 192.168.1.20 -script my_tags.lua
 ```
 
 ### Flags
@@ -260,7 +260,7 @@ end
 The built-in demo script produces output similar to:
 
 ```
-Connected to EtherNet/IP device at 10.0.10.70
+Connected to EtherNet/IP device at 192.168.1.20
 ------------------------------------------------------------
 
 [1] Discovering tags on PLC...
@@ -334,5 +334,5 @@ client:close()
 Run it:
 
 ```
-go run ./examples/lua/ethernetip_client/ -addr 10.0.10.70 -script my_tags.lua
+go run ./examples/lua/ethernetip_client/ -addr 192.168.1.20 -script my_tags.lua
 ```

@@ -99,19 +99,19 @@ conditions, and sleeps for `POLL_MS` between cycles.
 Connect to an EtherNet/IP PLC:
 
 ```bash
-go run ./examples/lua/condition_monitor/ -addr 10.0.10.70
+go run ./examples/lua/condition_monitor/ -addr 192.168.1.20
 ```
 
 Faster polling with a cycle limit:
 
 ```bash
-go run ./examples/lua/condition_monitor/ -addr 10.0.10.70 -poll 50 -cycles 500
+go run ./examples/lua/condition_monitor/ -addr 192.168.1.20 -poll 50 -cycles 500
 ```
 
 Run a custom condition script:
 
 ```bash
-go run ./examples/lua/condition_monitor/ -addr 10.0.10.70 -script my_conditions.lua
+go run ./examples/lua/condition_monitor/ -addr 192.168.1.20 -script my_conditions.lua
 ```
 
 ### Flags
@@ -159,7 +159,7 @@ sig:set("drive_ready", coils[4], now)
 ## Expected output
 
 ```
-Connected to 10.0.10.70
+Connected to 192.168.1.20
 Monitoring 4 signals, 3 conditions — poll every 100ms
 ----------------------------------------------------------------
 [     0.5s] ESTOP   emergency stop engaged

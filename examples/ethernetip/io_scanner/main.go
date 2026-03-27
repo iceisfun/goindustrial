@@ -48,7 +48,7 @@ func main() {
 
 	if *addr == "" {
 		fmt.Fprintln(os.Stderr, "Usage: go run . -addr <PLC_IP> [options]")
-		fmt.Fprintln(os.Stderr, "  Example: go run . -addr 10.0.10.70")
+		fmt.Fprintln(os.Stderr, "  Example: go run . -addr 192.168.1.20")
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
