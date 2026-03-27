@@ -107,6 +107,20 @@ func (p *Path) AddAttribute(attributeID UINT) {
 	}
 }
 
+// AddConnectionPoint adds a Connection Point segment to the path (0x2C/0x2D).
+func (p *Path) AddConnectionPoint(pointID UINT) {
+	if pointID <= 0xFF {
+		*p = append(*p, SegmentTypeLogical|LogicalTypePoint|LogicalFormat8Bit)
+		*p = append(*p, byte(pointID))
+	} else {
+		*p = append(*p, SegmentTypeLogical|LogicalTypePoint|LogicalFormat16Bit)
+		*p = append(*p, 0x00) // Pad
+		b := make([]byte, 2)
+		binary.LittleEndian.PutUint16(b, uint16(pointID))
+		*p = append(*p, b...)
+	}
+}
+
 // AddMember adds a Member segment to the path
 func (p *Path) AddMember(memberID UINT) {
 	if memberID <= 0xFF {

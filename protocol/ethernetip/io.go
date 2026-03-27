@@ -44,6 +44,11 @@ type IOConnectionConfig struct {
 	// TargetAddr is the UDP address to send O→T data to. If nil, the
 	// scanner resolves it from the TCP session's remote address + port 2222.
 	TargetAddr *net.UDPAddr
+
+	// ConnectionPath overrides the auto-generated connection path. If nil,
+	// the scanner builds a standard path from the assembly instances:
+	// [Class 0x04, Instance config, ConnPt OT, ConnPt TO].
+	ConnectionPath []byte
 }
 
 // IOScannerOption configures an IOScanner.
@@ -161,16 +166,23 @@ func (s *IOScanner) Open(ctx context.Context, cfg IOConnectionConfig) (*IOConn, 
 	otConnID := s.nextOTID.Add(1)
 	serial := cip.UINT(s.nextSerial.Add(1))
 
-	// Build connection path: [Class Assembly, Instance OT] [Class Assembly, Instance TO]
-	connPath := cip.NewPath()
-	if cfg.ConfigInstance > 0 {
-		connPath.AddClass(cip.ClassAssembly)
-		connPath.AddInstance(cip.UINT(cfg.ConfigInstance))
+	// Build connection path using connection points (0x2C segments).
+	// Standard Logix format: [Class 0x04] [Instance config] [ConnPt OT] [ConnPt TO]
+	var connPath []byte
+	if cfg.ConnectionPath != nil {
+		connPath = cfg.ConnectionPath
+	} else {
+		p := cip.NewPath()
+		p.AddClass(cip.ClassAssembly)
+		if cfg.ConfigInstance > 0 {
+			p.AddInstance(cip.UINT(cfg.ConfigInstance))
+		} else {
+			p.AddInstance(1)
+		}
+		p.AddConnectionPoint(cip.UINT(cfg.OTConnectionPoint))
+		p.AddConnectionPoint(cip.UINT(cfg.TOConnectionPoint))
+		connPath = p.Bytes()
 	}
-	connPath.AddClass(cip.ClassAssembly)
-	connPath.AddInstance(cip.UINT(cfg.OTConnectionPoint))
-	connPath.AddClass(cip.ClassAssembly)
-	connPath.AddInstance(cip.UINT(cfg.TOConnectionPoint))
 
 	rpiMicros := cip.UDINT(cfg.RPI / time.Microsecond)
 
@@ -191,7 +203,7 @@ func (s *IOScanner) Open(ctx context.Context, cfg IOConnectionConfig) (*IOConn, 
 		TORPI:                       rpiMicros,
 		TONetworkConnectionParams:   toParams,
 		TransportTypeTrigger:        0x01, // Class 1, cyclic, server trigger
-		ConnectionPath:              connPath.Bytes(),
+		ConnectionPath:              connPath,
 	}
 
 	foData, err := foReq.Encode()
@@ -214,7 +226,11 @@ func (s *IOScanner) Open(ctx context.Context, cfg IOConnectionConfig) (*IOConn, 
 		return nil, fmt.Errorf("Forward_Open send: %w", err)
 	}
 	if !resp.IsSuccess() {
-		return nil, fmt.Errorf("Forward_Open failed: status 0x%02X", resp.GeneralStatus)
+		extStr := ""
+		if len(resp.ExtStatus) > 0 {
+			extStr = fmt.Sprintf(", ext status 0x%04X", resp.ExtStatus[0])
+		}
+		return nil, fmt.Errorf("Forward_Open failed: general status 0x%02X%s", resp.GeneralStatus, extStr)
 	}
 
 	// Parse ForwardOpenResponse (26 bytes minimum: OT+TO conn IDs + triad + APIs + reply size + reserved)
