@@ -31,6 +31,55 @@ type ListServicesItem struct {
 	Name            string // 16 bytes fixed
 }
 
+// EncodeListIdentityResponse encodes a list of identity items into the
+// response data format for a CommandListIdentity reply.
+func EncodeListIdentityResponse(items []ListIdentityItem) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.LittleEndian, uint16(len(items)))
+	for _, item := range items {
+		nameBytes := []byte(item.ProductName)
+		if len(nameBytes) > 32 {
+			nameBytes = nameBytes[:32]
+		}
+		// TypeID and Length
+		binary.Write(buf, binary.LittleEndian, item.TypeID)
+		// Length: everything after TypeID+Length = EncapsVersion(2) + SocketAddr(16) +
+		// VendorID(2) + DeviceType(2) + ProductCode(2) + Revision(2) + Status(2) +
+		// SerialNumber(4) + NameLen(1) + Name(n) + State(1) = 34 + len(name)
+		length := uint16(34 + len(nameBytes))
+		binary.Write(buf, binary.LittleEndian, length)
+		binary.Write(buf, binary.LittleEndian, item.EncapsVersion)
+		buf.Write(item.SocketAddr[:])
+		binary.Write(buf, binary.LittleEndian, item.VendorID)
+		binary.Write(buf, binary.LittleEndian, item.DeviceType)
+		binary.Write(buf, binary.LittleEndian, item.ProductCode)
+		buf.Write(item.Revision[:])
+		binary.Write(buf, binary.LittleEndian, item.Status)
+		binary.Write(buf, binary.LittleEndian, item.SerialNumber)
+		buf.WriteByte(uint8(len(nameBytes)))
+		buf.Write(nameBytes)
+		buf.WriteByte(item.State)
+	}
+	return buf.Bytes(), nil
+}
+
+// EncodeListServicesResponse encodes a list of service items into the
+// response data format for a CommandListServices reply.
+func EncodeListServicesResponse(items []ListServicesItem) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.LittleEndian, uint16(len(items)))
+	for _, item := range items {
+		binary.Write(buf, binary.LittleEndian, item.TypeID)
+		binary.Write(buf, binary.LittleEndian, uint16(20)) // Length: Version(2) + Flags(2) + Name(16)
+		binary.Write(buf, binary.LittleEndian, item.Version)
+		binary.Write(buf, binary.LittleEndian, item.CapabilityFlags)
+		var nameFixed [16]byte
+		copy(nameFixed[:], item.Name)
+		buf.Write(nameFixed[:])
+	}
+	return buf.Bytes(), nil
+}
+
 // DecodeListServicesItem decodes a single service item
 func DecodeListServicesItem(r io.Reader) (*ListServicesItem, error) {
 	item := &ListServicesItem{}
