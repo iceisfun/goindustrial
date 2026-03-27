@@ -1057,6 +1057,470 @@ func TestUnmarshalNilPointer(t *testing.T) {
 }
 
 // ===========================================================================
+// Tests mined from cpppo (https://github.com/pjkundert/cpppo)
+// Python EtherNet/IP CIP library — authoritative EPATH and CIP data tests
+// ===========================================================================
+
+// --- EPATH wire-format vectors ---
+
+func TestPathMixedSegments(t *testing.T) {
+	// extpath_3: A complex path with elements, classes, instances, attributes.
+	// We verify our Path builder produces the same bytes cpppo expects.
+	//
+	// Wire format:
+	//   0x20, 0x11  ->  8-bit class  == 0x11
+	//   0x21, 0x00, 0x11, 0x02  -> 16-bit class == 0x0211
+	//   0x24, 0x21  ->  8-bit instance == 0x21
+	//   0x25, 0x00, 0x21, 0x02  -> 16-bit instance == 0x0221
+	//   0x30, 0x31  ->  8-bit attribute == 0x31
+	//   0x31, 0x00, 0x31, 0x02  -> 16-bit attribute == 0x0231
+
+	// 8-bit class 0x11
+	p := NewPath()
+	p.AddClass(0x11)
+	if !bytes.Equal(p.Bytes(), []byte{0x20, 0x11}) {
+		t.Fatalf("8-bit class 0x11: got %X, want 2011", p.Bytes())
+	}
+
+	// 16-bit class 0x0211
+	p = NewPath()
+	p.AddClass(0x0211)
+	if !bytes.Equal(p.Bytes(), []byte{0x21, 0x00, 0x11, 0x02}) {
+		t.Fatalf("16-bit class 0x0211: got %X, want 21001102", p.Bytes())
+	}
+
+	// 8-bit instance 0x21
+	p = NewPath()
+	p.AddInstance(0x21)
+	if !bytes.Equal(p.Bytes(), []byte{0x24, 0x21}) {
+		t.Fatalf("8-bit instance 0x21: got %X, want 2421", p.Bytes())
+	}
+
+	// 16-bit instance 0x0221
+	p = NewPath()
+	p.AddInstance(0x0221)
+	if !bytes.Equal(p.Bytes(), []byte{0x25, 0x00, 0x21, 0x02}) {
+		t.Fatalf("16-bit instance 0x0221: got %X, want 25002102", p.Bytes())
+	}
+
+	// 8-bit attribute 0x31
+	p = NewPath()
+	p.AddAttribute(0x31)
+	if !bytes.Equal(p.Bytes(), []byte{0x30, 0x31}) {
+		t.Fatalf("8-bit attribute 0x31: got %X, want 3031", p.Bytes())
+	}
+
+	// 16-bit attribute 0x0231
+	p = NewPath()
+	p.AddAttribute(0x0231)
+	if !bytes.Equal(p.Bytes(), []byte{0x31, 0x00, 0x31, 0x02}) {
+		t.Fatalf("16-bit attribute 0x0231: got %X, want 31003102", p.Bytes())
+	}
+}
+
+func TestPathSymbolicSegments(t *testing.T) {
+	// extpath_4:
+	//   0x91, 0x06, 'a','b','c','1','2','3'  -> symbolic "abc123" (even, no pad)
+	//   0x91, 0x05, 'x','y','z','1','2', 0x00 -> symbolic "xyz12" (odd, +pad)
+
+	p := NewPath()
+	p.AddSymbolicSegment("abc123")
+	expected := []byte{0x91, 0x06, 'a', 'b', 'c', '1', '2', '3'}
+	if !bytes.Equal(p.Bytes(), expected) {
+		t.Fatalf("symbolic abc123: got %X, want %X", p.Bytes(), expected)
+	}
+
+	p = NewPath()
+	p.AddSymbolicSegment("xyz12")
+	expected = []byte{0x91, 0x05, 'x', 'y', 'z', '1', '2', 0x00}
+	if !bytes.Equal(p.Bytes(), expected) {
+		t.Fatalf("symbolic xyz12: got %X, want %X", p.Bytes(), expected)
+	}
+}
+
+func TestPathAssemblyClassInstance(t *testing.T) {
+	// extpath_9 (from LEC-GEN1_v1 EDS):
+	//   0x20, 0x04  -> Class 0x04 (Assembly Object)
+	//   0x24, 0x05  -> Instance 5
+	// Connection points (0x2C) are not implemented in goindustrial,
+	// but we verify the class/instance portion matches.
+
+	p := NewPath()
+	p.AddClass(0x04)
+	p.AddInstance(0x05)
+	expected := []byte{0x20, 0x04, 0x24, 0x05}
+	if !bytes.Equal(p.Bytes(), expected) {
+		t.Fatalf("assembly class 0x04 instance 5: got %X, want %X", p.Bytes(), expected)
+	}
+}
+
+func TestPathPortSegmentBasic(t *testing.T) {
+	// extpath_5: port #1, link 0x00
+	//   0x01, 0x00 -> port 1, link address 0x00
+	p := NewPath()
+	p.AddPortSegment(1, []byte{0x00})
+	expected := []byte{0x01, 0x00}
+	if !bytes.Equal(p.Bytes(), expected) {
+		t.Fatalf("port 1 link 0: got %X, want %X", p.Bytes(), expected)
+	}
+}
+
+func TestPathLenWords(t *testing.T) {
+	// cpppo extpath_0: 0 words (empty path)
+	p := NewPath()
+	if p.LenWords() != 0 {
+		t.Fatalf("empty path words: got %d, want 0", p.LenWords())
+	}
+
+	// cpppo extpath_1: 1 word (2 bytes: 0x28, 0x01)
+	// Our Member segment is 0x28 for member ID 1
+	p = NewPath()
+	p.AddMember(0x01)
+	if p.LenWords() != 1 {
+		t.Fatalf("1-word path: got %d, want 1", p.LenWords())
+	}
+
+	// cpppo extpath_4: 8 words (16 bytes for two symbolic segments)
+	p = NewPath()
+	p.AddSymbolicSegment("abc123")
+	p.AddSymbolicSegment("xyz12")
+	if p.LenWords() != 8 {
+		t.Fatalf("symbolic path words: got %d, want 8", p.LenWords())
+	}
+}
+
+func TestPathBuildGetAttributeAllPath(t *testing.T) {
+	// cpppo gaa_008_request CIP path: 0x20, 0x66, 0x24, 0x01
+	// Class 0x66, Instance 0x01
+	p := BuildPath(0x66, 0x01, 0)
+	expected := []byte{0x20, 0x66, 0x24, 0x01}
+	if !bytes.Equal(p.Bytes(), expected) {
+		t.Fatalf("GAA path class=0x66 inst=1: got %X, want %X", p.Bytes(), expected)
+	}
+}
+
+func TestPathBuildIdentityObjectPath(t *testing.T) {
+	// cpppo gaa_011_request CIP path: 0x20, 0x01, 0x24, 0x01
+	// Class 0x01 (Identity Object), Instance 0x01
+	p := BuildPath(0x01, 0x01, 0)
+	expected := []byte{0x20, 0x01, 0x24, 0x01}
+	if !bytes.Equal(p.Bytes(), expected) {
+		t.Fatalf("Identity path: got %X, want %X", p.Bytes(), expected)
+	}
+}
+
+func TestPathBuildConnectionManagerPath(t *testing.T) {
+	// cpppo Unconnected Send path: 0x20, 0x06, 0x24, 0x01
+	// Class 0x06 (Connection Manager), Instance 0x01
+	p := BuildPath(0x06, 0x01, 0)
+	expected := []byte{0x20, 0x06, 0x24, 0x01}
+	if !bytes.Equal(p.Bytes(), expected) {
+		t.Fatalf("Connection Manager path: got %X, want %X", p.Bytes(), expected)
+	}
+}
+
+// --- CIP data type boundary values ---
+
+func TestEncodeDecodeLINTBoundary(t *testing.T) {
+	// struct.pack('<q', -1234567890123456789)
+	var v int64 = -1234567890123456789
+	data, err := Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 8 {
+		t.Fatalf("LINT length: got %d, want 8", len(data))
+	}
+
+	var out int64
+	if err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out != -1234567890123456789 {
+		t.Fatalf("LINT boundary: got %d, want -1234567890123456789", out)
+	}
+}
+
+func TestEncodeDecodeULINTMaxBit63(t *testing.T) {
+	// b'\x00\x00\x00\x00\x00\x00\x00\x80' == 2^63
+	var v uint64 = 1 << 63 // 2^63 = 9223372036854775808
+	data, err := Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify wire format
+	expected := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80}
+	if !bytes.Equal(data, expected) {
+		t.Fatalf("ULINT 2^63 wire bytes: got %X, want %X", data, expected)
+	}
+
+	var out uint64
+	if err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out != 1<<63 {
+		t.Fatalf("ULINT 2^63 round-trip: got %d, want %d", out, uint64(1<<63))
+	}
+}
+
+func TestEncodeDecodeINTLittleEndian(t *testing.T) {
+	// b'\x01\x00' -> INT value 1 (little-endian)
+	data := []byte{0x01, 0x00}
+	var out int16
+	if err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out != 1 {
+		t.Fatalf("INT from bytes 0x0100: got %d, want 1", out)
+	}
+}
+
+func TestEncodeDecodeREALZero(t *testing.T) {
+	// 4 x REAL all zeros -> [0.0, 0.0, 0.0, 0.0]
+	data := []byte{0x00, 0x00, 0x00, 0x00}
+	var out float32
+	if err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out != 0.0 {
+		t.Fatalf("REAL zero: got %f, want 0.0", out)
+	}
+}
+
+func TestEncodeDecodeLREALRoundTrip(t *testing.T) {
+	// struct.pack('<d', 1.23) -> LREAL 1.23
+	var v float64 = 1.23
+	data, err := Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out float64
+	if err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out != 1.23 {
+		t.Fatalf("LREAL 1.23: got %f, want 1.23", out)
+	}
+}
+
+// --- BOOL truthiness ---
+
+func TestBoolTruthiness(t *testing.T) {
+	// b'\x00\x01\x02\x04\x08\x10\x20\x40\x80\xff\x00'
+	// Expected truths: [False, True, True, True, True, True, True, True, True, True, False]
+	// Any non-zero byte is true.
+	testCases := []struct {
+		raw  byte
+		want bool
+	}{
+		{0x00, false},
+		{0x01, true},
+		{0x02, true},
+		{0x04, true},
+		{0x08, true},
+		{0x10, true},
+		{0x20, true},
+		{0x40, true},
+		{0x80, true},
+		{0xFF, true},
+	}
+	for _, tc := range testCases {
+		var out bool
+		if err := Unmarshal([]byte{tc.raw}, &out); err != nil {
+			t.Fatalf("BOOL 0x%02X: %v", tc.raw, err)
+		}
+		if out != tc.want {
+			t.Fatalf("BOOL 0x%02X: got %v, want %v", tc.raw, out, tc.want)
+		}
+	}
+}
+
+// --- CIP service code and class ID constant verification ---
+
+func TestCIPServiceCodes(t *testing.T) {
+	// Verify service codes match expected values:
+	// 0x01 = Get Attribute All
+	// 0x52 = Unconnected Send (Read/Write Tag)
+	// 0x54 = Forward Open
+	// 0x4c = Read Tag
+	// 0x4d = Write Tag
+	// 0x52 = Read Tag Fragmented
+	// 0x53 = Write Tag Fragmented
+
+	if ServiceGetAttributeAll != 0x01 {
+		t.Fatalf("ServiceGetAttributeAll: got 0x%02X, want 0x01", ServiceGetAttributeAll)
+	}
+	if ServiceReadTag != 0x4C {
+		t.Fatalf("ServiceReadTag: got 0x%02X, want 0x4C", ServiceReadTag)
+	}
+	if ServiceWriteTag != 0x4D {
+		t.Fatalf("ServiceWriteTag: got 0x%02X, want 0x4D", ServiceWriteTag)
+	}
+	if ServiceReadTagFragmented != 0x52 {
+		t.Fatalf("ServiceReadTagFragmented: got 0x%02X, want 0x52", ServiceReadTagFragmented)
+	}
+	if ServiceWriteTagFragmented != 0x53 {
+		t.Fatalf("ServiceWriteTagFragmented: got 0x%02X, want 0x53", ServiceWriteTagFragmented)
+	}
+	// Note: ServiceForwardOpen (0x54) is defined in the connmgr package, not cip
+}
+
+func TestCIPClassIDs(t *testing.T) {
+	// Verify class IDs match expected values
+	if ClassIdentity != 0x01 {
+		t.Fatalf("ClassIdentity: got 0x%04X, want 0x01", ClassIdentity)
+	}
+	if ClassConnectionMgr != 0x06 {
+		t.Fatalf("ClassConnectionMgr: got 0x%04X, want 0x06", ClassConnectionMgr)
+	}
+}
+
+// --- CIP data type codes ---
+
+func TestCIPDataTypeCodes(t *testing.T) {
+	// Verify tag_type values used in typed_data parsing
+	if TypeBOOL != 0x00C1 {
+		t.Fatalf("TypeBOOL: got 0x%04X, want 0x00C1", TypeBOOL)
+	}
+	if TypeSINT != 0x00C2 {
+		t.Fatalf("TypeSINT: got 0x%04X, want 0x00C2", TypeSINT)
+	}
+	if TypeINT != 0x00C3 {
+		t.Fatalf("TypeINT: got 0x%04X, want 0x00C3", TypeINT)
+	}
+	if TypeDINT != 0x00C4 {
+		t.Fatalf("TypeDINT: got 0x%04X, want 0x00C4", TypeDINT)
+	}
+	if TypeLINT != 0x00C5 {
+		t.Fatalf("TypeLINT: got 0x%04X, want 0x00C5", TypeLINT)
+	}
+	if TypeUSINT != 0x00C6 {
+		t.Fatalf("TypeUSINT: got 0x%04X, want 0x00C6", TypeUSINT)
+	}
+	if TypeUINT != 0x00C7 {
+		t.Fatalf("TypeUINT: got 0x%04X, want 0x00C7", TypeUINT)
+	}
+	if TypeUDINT != 0x00C8 {
+		t.Fatalf("TypeUDINT: got 0x%04X, want 0x00C8", TypeUDINT)
+	}
+	if TypeULINT != 0x00C9 {
+		t.Fatalf("TypeULINT: got 0x%04X, want 0x00C9", TypeULINT)
+	}
+	if TypeREAL != 0x00CA {
+		t.Fatalf("TypeREAL: got 0x%04X, want 0x00CA", TypeREAL)
+	}
+	if TypeLREAL != 0x00CB {
+		t.Fatalf("TypeLREAL: got 0x%04X, want 0x00CB", TypeLREAL)
+	}
+	if TypeSTRING != 0x00D0 {
+		t.Fatalf("TypeSTRING: got 0x%04X, want 0x00D0", TypeSTRING)
+	}
+}
+
+// --- MessageRouter response decoding from wire captures ---
+
+func TestMessageRouterResponseDecodeTagReply(t *testing.T) {
+	// cpppo unk_014_reply CPF data inner CIP response:
+	// 0xd2, 0x00, 0x00, 0x00 -> service 0xD2 (reply bit set for 0x52),
+	//   reserved 0x00, status 0x00 (success), ext_status_size 0x00
+	//
+	// This is the CIP response portion from a real Logix PLC.
+	data := []byte{
+		0xD2,       // Service = 0x52 | 0x80 (reply)
+		0x00,       // Reserved
+		0x00,       // Status = success
+		0x00,       // Extended status size = 0
+		0xC3, 0x00, // Response data: type code 0x00C3 (INT)
+		0x27, 0x80, // INT value = 0x8027 = -32729 (signed) or 32807 (unsigned)
+	}
+
+	resp, err := DecodeMessageRouterResponse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Service != 0xD2 {
+		t.Fatalf("service: got 0x%02X, want 0xD2", resp.Service)
+	}
+	if resp.GeneralStatus != 0x00 {
+		t.Fatalf("status: got 0x%02X, want 0x00", resp.GeneralStatus)
+	}
+	if len(resp.ExtStatus) != 0 {
+		t.Fatalf("ext status: got %d entries, want 0", len(resp.ExtStatus))
+	}
+	// Response data should be the type code + value
+	if len(resp.ResponseData) != 4 {
+		t.Fatalf("data length: got %d, want 4", len(resp.ResponseData))
+	}
+}
+
+func TestMessageRouterResponseDecodePathError(t *testing.T) {
+	// cpppo rfg_002_reply — CIP error 0x04 with extended status:
+	// 0xd2, 0x00, 0x04, 0x01, 0x00, 0x00
+	// Service 0xD2, reserved 0x00, status 0x04 (path error),
+	// ext_status_size=1, ext_status=0x0000
+	data := []byte{
+		0xD2,       // Service
+		0x00,       // Reserved
+		0x04,       // Status = 0x04 (path segment error)
+		0x01,       // Extended status size = 1 word
+		0x00, 0x00, // Extended status word = 0x0000
+	}
+
+	resp, err := DecodeMessageRouterResponse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GeneralStatus != 0x04 {
+		t.Fatalf("status: got 0x%02X, want 0x04", resp.GeneralStatus)
+	}
+	if len(resp.ExtStatus) != 1 {
+		t.Fatalf("ext status: got %d entries, want 1", len(resp.ExtStatus))
+	}
+	if resp.ExtStatus[0] != 0x0000 {
+		t.Fatalf("ext status[0]: got 0x%04X, want 0x0000", resp.ExtStatus[0])
+	}
+}
+
+func TestMessageRouterResponseDecodeGeneralError(t *testing.T) {
+	// cpppo rfg_001_reply — CIP error 0x05:
+	// 0xd2, 0x00, 0x05, 0x00
+	// Service 0xD2, reserved 0x00, status 0x05, ext_status_size=0
+	data := []byte{
+		0xD2,
+		0x00,
+		0x05, // Status = 0x05 (access denied / privilege violation)
+		0x00,
+	}
+
+	resp, err := DecodeMessageRouterResponse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GeneralStatus != 0x05 {
+		t.Fatalf("status: got 0x%02X, want 0x05", resp.GeneralStatus)
+	}
+	if len(resp.ExtStatus) != 0 {
+		t.Fatalf("ext status: got %d entries, want 0", len(resp.ExtStatus))
+	}
+}
+
+// --- CIP string encoding verification ---
+
+func TestGoTypeToCIPTypeString(t *testing.T) {
+	// STRING type code is 0x00D0.
+	// Verify Go string maps to TypeSTRING.
+	dt, err := GoTypeToCIPType("Hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dt != TypeSTRING {
+		t.Fatalf("string type: got 0x%04X, want 0x%04X (TypeSTRING)", dt, TypeSTRING)
+	}
+}
+
+// ===========================================================================
 // test helpers
 // ===========================================================================
 
