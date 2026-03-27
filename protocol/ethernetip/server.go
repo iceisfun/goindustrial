@@ -1,18 +1,25 @@
 package ethernetip
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/iceisfun/goindustrial/logging"
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/cip"
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/eip"
 )
+
+// ConnectedClient describes an active EIP connection.
+type ConnectedClient struct {
+	RemoteAddr    string
+	SessionHandle uint32
+	ConnectedAt   time.Time
+}
 
 // Server implements an EtherNet/IP Server (Adapter).
 type Server struct {
@@ -22,6 +29,24 @@ type Server struct {
 	done         chan struct{}
 	mu           sync.Mutex
 	injectedConn net.Conn // for single pre-established connections (net.Pipe)
+
+	// Session management — atomic counter ensures unique handles across connections.
+	nextSession atomic.Uint32
+
+	// Client tracking.
+	clientsMu          sync.RWMutex
+	clients            map[net.Conn]*connState
+	onClientConnect    func(ConnectedClient)
+	onClientDisconnect func(ConnectedClient)
+
+	// Identity for ListIdentity responses.
+	identity eip.ListIdentityItem
+}
+
+type connState struct {
+	remoteAddr    string
+	sessionHandle uint32
+	connectedAt   time.Time
 }
 
 // ServerOption configures a Server.
@@ -49,11 +74,38 @@ func WithServerConn(conn net.Conn) ServerOption {
 	}
 }
 
+// WithIdentity configures the device identity returned by ListIdentity.
+func WithIdentity(id eip.ListIdentityItem) ServerOption {
+	return func(s *Server) {
+		s.identity = id
+	}
+}
+
+// WithOnClientConnect sets a callback fired when a client connection is accepted.
+func WithOnClientConnect(fn func(ConnectedClient)) ServerOption {
+	return func(s *Server) {
+		s.onClientConnect = fn
+	}
+}
+
+// WithOnClientDisconnect sets a callback fired when a client disconnects.
+func WithOnClientDisconnect(fn func(ConnectedClient)) ServerOption {
+	return func(s *Server) {
+		s.onClientDisconnect = fn
+	}
+}
+
 // NewServer creates a new Server backed by the given message router.
 func NewServer(router *cip.MessageRouter, opts ...ServerOption) *Server {
 	s := &Server{
-		router: router,
-		logger: logging.NewNopLogger(),
+		router:  router,
+		logger:  logging.NewNopLogger(),
+		clients: make(map[net.Conn]*connState),
+		identity: eip.ListIdentityItem{
+			TypeID:        eip.ItemIDListIdentity,
+			EncapsVersion: 1,
+			ProductName:   "GoIndustrial EIP Server",
+		},
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -103,6 +155,22 @@ func (s *Server) Stop() error {
 	return nil
 }
 
+// ConnectedClients returns a snapshot of all active client connections.
+func (s *Server) ConnectedClients() []ConnectedClient {
+	s.clientsMu.RLock()
+	defer s.clientsMu.RUnlock()
+
+	result := make([]ConnectedClient, 0, len(s.clients))
+	for _, cs := range s.clients {
+		result = append(result, ConnectedClient{
+			RemoteAddr:    cs.remoteAddr,
+			SessionHandle: cs.sessionHandle,
+			ConnectedAt:   cs.connectedAt,
+		})
+	}
+	return result
+}
+
 func (s *Server) acceptLoop() {
 	for {
 		conn, err := s.ln.Accept()
@@ -124,12 +192,41 @@ func (s *Server) acceptLoop() {
 func (s *Server) HandleConn(conn net.Conn) {
 	defer conn.Close()
 
+	cs := &connState{
+		remoteAddr:  conn.RemoteAddr().String(),
+		connectedAt: time.Now(),
+	}
+
+	s.clientsMu.Lock()
+	s.clients[conn] = cs
+	s.clientsMu.Unlock()
+
+	if s.onClientConnect != nil {
+		s.onClientConnect(ConnectedClient{
+			RemoteAddr:  cs.remoteAddr,
+			ConnectedAt: cs.connectedAt,
+		})
+	}
+
+	defer func() {
+		s.clientsMu.Lock()
+		delete(s.clients, conn)
+		s.clientsMu.Unlock()
+
+		if s.onClientDisconnect != nil {
+			s.onClientDisconnect(ConnectedClient{
+				RemoteAddr:    cs.remoteAddr,
+				SessionHandle: cs.sessionHandle,
+				ConnectedAt:   cs.connectedAt,
+			})
+		}
+	}()
+
 	var sessionHandle uint32
 
 	headerBuf := make([]byte, eip.HeaderSize)
 
 	for {
-		// Check if we're done
 		select {
 		case <-s.done:
 			return
@@ -141,19 +238,16 @@ func (s *Server) HandleConn(conn net.Conn) {
 			return
 		}
 
-		// Parse Header
 		command := eip.Command(binary.LittleEndian.Uint16(headerBuf[0:2]))
 		dataLen := binary.LittleEndian.Uint16(headerBuf[2:4])
 		session := binary.LittleEndian.Uint32(headerBuf[4:8])
 		senderContext := headerBuf[12:20]
 
-		// Check Max Packet Size
-		const MaxPacketSize = 4096
-		if dataLen > MaxPacketSize {
+		const maxPacketSize = 4096
+		if dataLen > maxPacketSize {
 			return
 		}
 
-		// Read Data
 		data := make([]byte, dataLen)
 		if dataLen > 0 {
 			if _, err := io.ReadFull(conn, data); err != nil {
@@ -167,8 +261,9 @@ func (s *Server) HandleConn(conn net.Conn) {
 
 		switch command {
 		case eip.CommandRegisterSession:
-			sessionHandle = 0x01020304
+			sessionHandle = s.nextSession.Add(1)
 			session = sessionHandle
+			cs.sessionHandle = sessionHandle
 			respData = make([]byte, 4)
 			binary.LittleEndian.PutUint16(respData[0:], 1) // Protocol Version 1
 			binary.LittleEndian.PutUint16(respData[2:], 0) // Options 0
@@ -176,20 +271,40 @@ func (s *Server) HandleConn(conn net.Conn) {
 		case eip.CommandUnregisterSession:
 			return // Close connection
 
-		case eip.CommandSendRRData:
-			respData, err = s.handleSendRRData(data)
+		case eip.CommandListIdentity:
+			respData, err = s.handleListIdentity()
 			if err != nil {
-				status = 0x0001
+				status = eip.StatusInvalidCommand
+			}
+
+		case eip.CommandListServices:
+			respData, err = s.handleListServices()
+			if err != nil {
+				status = eip.StatusInvalidCommand
+			}
+
+		case eip.CommandSendRRData:
+			if session != sessionHandle || sessionHandle == 0 {
+				status = eip.StatusInvalidSessionHandle
+			} else {
+				respData, err = s.handleSendRRData(data)
+				if err != nil {
+					status = eip.StatusInvalidCommand
+				}
 			}
 
 		case eip.CommandSendUnitData:
-			respData, err = s.handleSendUnitData(data)
-			if err != nil {
-				status = 0x0001
+			if session != sessionHandle || sessionHandle == 0 {
+				status = eip.StatusInvalidSessionHandle
+			} else {
+				respData, err = s.handleSendUnitData(data)
+				if err != nil {
+					status = eip.StatusInvalidCommand
+				}
 			}
 
 		default:
-			status = 0x0001
+			status = eip.StatusInvalidCommand
 		}
 
 		// Send Response
@@ -212,172 +327,128 @@ func (s *Server) HandleConn(conn net.Conn) {
 	}
 }
 
+func (s *Server) handleListIdentity() ([]byte, error) {
+	return eip.EncodeListIdentityResponse([]eip.ListIdentityItem{s.identity})
+}
+
+func (s *Server) handleListServices() ([]byte, error) {
+	return eip.EncodeListServicesResponse([]eip.ListServicesItem{{
+		TypeID:          eip.ItemIDListServices,
+		Version:         1,
+		CapabilityFlags: 0x0020, // Supports CIP encapsulation via TCP
+		Name:            "Communications",
+	}})
+}
+
 func (s *Server) handleSendRRData(data []byte) ([]byte, error) {
 	if len(data) < 6 {
-		return nil, fmt.Errorf("short data")
+		return nil, errShortData
 	}
 
-	cpfData := data[6:]
-	cpf, err := eip.DecodeCommonPacketFormat(cpfData)
+	cpf, err := eip.DecodeCommonPacketFormat(data[6:])
 	if err != nil {
 		return nil, err
 	}
 
 	item := cpf.FindItemByType(eip.ItemIDUnconnectedMessage)
 	if item == nil {
-		return nil, fmt.Errorf("no unconnected message item")
+		return nil, errNoCPFItem
 	}
 
-	// Decode Message Router Request
-	mrReq := &cip.MessageRouterRequest{}
-	buf := bytes.NewReader(item.Data)
-	if err := binary.Read(buf, binary.LittleEndian, &mrReq.Service); err != nil {
+	mrReq, err := cip.DecodeMessageRouterRequest(item.Data)
+	if err != nil {
 		return nil, err
-	}
-	var pathSizeWords uint8
-	if err := binary.Read(buf, binary.LittleEndian, &pathSizeWords); err != nil {
-		return nil, err
-	}
-	pathBytes := make([]byte, int(pathSizeWords)*2)
-	if _, err := buf.Read(pathBytes); err != nil {
-		return nil, err
-	}
-	mrReq.RequestPath = cip.Path(pathBytes)
-
-	remaining := buf.Len()
-	if remaining > 0 {
-		mrReq.RequestData = make([]byte, remaining)
-		if _, err := buf.Read(mrReq.RequestData); err != nil {
-			return nil, err
-		}
 	}
 
-	// Dispatch
 	mrResp, err := s.router.Dispatch(mrReq)
 	if err != nil {
 		return nil, err
 	}
 
-	// Encode Response
-	respBuf := new(bytes.Buffer)
-	binary.Write(respBuf, binary.LittleEndian, mrResp.Service)
-	binary.Write(respBuf, binary.LittleEndian, mrResp.Reserved)
-	binary.Write(respBuf, binary.LittleEndian, mrResp.GeneralStatus)
-	binary.Write(respBuf, binary.LittleEndian, mrResp.ExtStatusSize)
-	for _, ext := range mrResp.ExtStatus {
-		binary.Write(respBuf, binary.LittleEndian, ext)
-	}
-	respBuf.Write(mrResp.ResponseData)
-
-	// Construct Response CPF
-	respCPF := eip.NewCommonPacketFormat(
-		eip.NewCPFItem(eip.ItemIDNullAddress, nil),
-		eip.NewCPFItem(eip.ItemIDUnconnectedMessage, respBuf.Bytes()),
-	)
-
-	respCPFData, err := respCPF.Encode()
+	respBytes, err := mrResp.Encode()
 	if err != nil {
 		return nil, err
 	}
 
-	// Prepend Interface Handle (0) and Timeout (0)
-	finalResp := make([]byte, 6+len(respCPFData))
-	copy(finalResp[6:], respCPFData)
-
-	return finalResp, nil
+	return wrapUnconnectedResponse(respBytes)
 }
 
 func (s *Server) handleSendUnitData(data []byte) ([]byte, error) {
 	if len(data) < 6 {
-		return nil, fmt.Errorf("short data")
+		return nil, errShortData
 	}
 
-	cpfData := data[6:]
-	cpf, err := eip.DecodeCommonPacketFormat(cpfData)
+	cpf, err := eip.DecodeCommonPacketFormat(data[6:])
 	if err != nil {
 		return nil, err
 	}
 
 	addrItem := cpf.FindItemByType(eip.ItemIDConnectedAddress)
-	if addrItem == nil {
-		return nil, fmt.Errorf("no connected address item")
-	}
-
-	if len(addrItem.Data) < 4 {
-		return nil, fmt.Errorf("short address item data")
+	if addrItem == nil || len(addrItem.Data) < 4 {
+		return nil, errNoCPFItem
 	}
 
 	dataItem := cpf.FindItemByType(eip.ItemIDConnectedData)
-	if dataItem == nil {
-		return nil, fmt.Errorf("no connected data item")
+	if dataItem == nil || len(dataItem.Data) < 2 {
+		return nil, errNoCPFItem
 	}
 
-	if len(dataItem.Data) < 2 {
-		return nil, fmt.Errorf("short data item data")
-	}
+	seqCount := binary.LittleEndian.Uint16(dataItem.Data[0:2])
 	pdu := dataItem.Data[2:]
 
-	// Decode Message Router Request from PDU (Class 3 explicit message)
-	mrReq := &cip.MessageRouterRequest{}
-	buf := bytes.NewReader(pdu)
-	if err := binary.Read(buf, binary.LittleEndian, &mrReq.Service); err != nil {
+	mrReq, err := cip.DecodeMessageRouterRequest(pdu)
+	if err != nil {
 		return nil, err
-	}
-	var pathSizeWords uint8
-	if err := binary.Read(buf, binary.LittleEndian, &pathSizeWords); err != nil {
-		return nil, err
-	}
-	pathBytes := make([]byte, int(pathSizeWords)*2)
-	if _, err := buf.Read(pathBytes); err != nil {
-		return nil, err
-	}
-	mrReq.RequestPath = cip.Path(pathBytes)
-
-	remaining := buf.Len()
-	if remaining > 0 {
-		mrReq.RequestData = make([]byte, remaining)
-		if _, err := buf.Read(mrReq.RequestData); err != nil {
-			return nil, err
-		}
 	}
 
-	// Dispatch
 	mrResp, err := s.router.Dispatch(mrReq)
 	if err != nil {
 		return nil, err
 	}
 
-	// Encode Response
-	respBuf := new(bytes.Buffer)
-	binary.Write(respBuf, binary.LittleEndian, mrResp.Service)
-	binary.Write(respBuf, binary.LittleEndian, mrResp.Reserved)
-	binary.Write(respBuf, binary.LittleEndian, mrResp.GeneralStatus)
-	binary.Write(respBuf, binary.LittleEndian, mrResp.ExtStatusSize)
-	for _, ext := range mrResp.ExtStatus {
-		binary.Write(respBuf, binary.LittleEndian, ext)
-	}
-	respBuf.Write(mrResp.ResponseData)
-
-	// Connected response
-	respAddrData := addrItem.Data
-
-	respDataBuf := new(bytes.Buffer)
-	seqCount := binary.LittleEndian.Uint16(dataItem.Data[0:2])
-	binary.Write(respDataBuf, binary.LittleEndian, seqCount)
-	respDataBuf.Write(respBuf.Bytes())
-
-	respCPF := eip.NewCommonPacketFormat(
-		eip.NewCPFItem(eip.ItemIDConnectedAddress, respAddrData),
-		eip.NewCPFItem(eip.ItemIDConnectedData, respDataBuf.Bytes()),
-	)
-
-	respCPFData, err := respCPF.Encode()
+	respBytes, err := mrResp.Encode()
 	if err != nil {
 		return nil, err
 	}
 
-	finalResp := make([]byte, 6+len(respCPFData))
-	copy(finalResp[6:], respCPFData)
-
-	return finalResp, nil
+	return wrapConnectedResponse(addrItem.Data, seqCount, respBytes)
 }
+
+// wrapUnconnectedResponse wraps MR response bytes in a SendRRData CPF envelope.
+func wrapUnconnectedResponse(mrRespBytes []byte) ([]byte, error) {
+	respCPF := eip.NewCommonPacketFormat(
+		eip.NewCPFItem(eip.ItemIDNullAddress, nil),
+		eip.NewCPFItem(eip.ItemIDUnconnectedMessage, mrRespBytes),
+	)
+	cpfData, err := respCPF.Encode()
+	if err != nil {
+		return nil, err
+	}
+	resp := make([]byte, 6+len(cpfData))
+	copy(resp[6:], cpfData)
+	return resp, nil
+}
+
+// wrapConnectedResponse wraps MR response bytes in a SendUnitData CPF envelope.
+func wrapConnectedResponse(addrData []byte, seqCount uint16, mrRespBytes []byte) ([]byte, error) {
+	dataBuf := make([]byte, 2+len(mrRespBytes))
+	binary.LittleEndian.PutUint16(dataBuf[0:2], seqCount)
+	copy(dataBuf[2:], mrRespBytes)
+
+	respCPF := eip.NewCommonPacketFormat(
+		eip.NewCPFItem(eip.ItemIDConnectedAddress, addrData),
+		eip.NewCPFItem(eip.ItemIDConnectedData, dataBuf),
+	)
+	cpfData, err := respCPF.Encode()
+	if err != nil {
+		return nil, err
+	}
+	resp := make([]byte, 6+len(cpfData))
+	copy(resp[6:], cpfData)
+	return resp, nil
+}
+
+var (
+	errShortData = cip.Error{Status: cip.StatusPathSegmentError}
+	errNoCPFItem = cip.Error{Status: cip.StatusPathSegmentError}
+)
