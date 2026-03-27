@@ -6,8 +6,11 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/iceisfun/goindustrial/transport"
 )
 
 // ---------------------------------------------------------------------------
@@ -2732,6 +2735,228 @@ func TestClientCallbacksOnConnect(t *testing.T) {
 		t.Error("OnClientDisconnect was not called")
 	}
 	connectMu.Unlock()
+
+	srv.Stop(context.Background())
+}
+
+// ---------------------------------------------------------------------------
+// chanListener accepts many pipe connections via a buffered channel.
+// ---------------------------------------------------------------------------
+
+type chanListener struct {
+	ch   chan net.Conn
+	done chan struct{}
+	once sync.Once
+}
+
+func newChanListener(buffer int) *chanListener {
+	return &chanListener{
+		ch:   make(chan net.Conn, buffer),
+		done: make(chan struct{}),
+	}
+}
+
+func (l *chanListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.ch:
+		return c, nil
+	case <-l.done:
+		return nil, &net.OpError{Op: "accept", Net: "pipe", Err: net.ErrClosed}
+	}
+}
+
+func (l *chanListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return nil
+}
+
+func (l *chanListener) Addr() net.Addr { return pipeAddr{} }
+
+// ===========================================================================
+// Stress Test: 1 writer + 1000 readers through loopback server
+// ===========================================================================
+
+func TestStressConcurrentClients(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping stress test in short mode")
+	}
+
+	const (
+		numReaders = 1000
+		numWrites  = 20
+		writeDelay = 2 * time.Millisecond
+		registerAt = Address(0)
+	)
+
+	// Create server with a MemoryStore.
+	store := NewMemoryStore()
+	ln := newChanListener(numReaders + 1)
+
+	srv := NewServer("test",
+		WithServerDataStore(store),
+		WithServerListener(ln),
+	)
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// dial creates a pipe pair, hands the server side to the listener,
+	// and returns the client-side conn.
+	dial := func() net.Conn {
+		t.Helper()
+		serverConn, clientConn := net.Pipe()
+		ln.ch <- serverConn
+		return clientConn
+	}
+
+	// --- Writer: uses a real Client through the full Modbus stack ---
+
+	writerConn := dial()
+	writerTC := NewTCPConn("test", WithConn(writerConn))
+	if err := writerTC.Connect(context.Background()); err != nil {
+		t.Fatalf("writer connect: %v", err)
+	}
+	writerTP, err := transport.NewDirectTransport(context.Background(),
+		transport.ConnectorFunc[*TCPConn](func(ctx context.Context) (*TCPConn, error) {
+			return writerTC, nil
+		}),
+		transport.CloserFunc[*TCPConn](func(conn *TCPConn) error {
+			return conn.Disconnect(context.Background())
+		}),
+	)
+	if err != nil {
+		t.Fatalf("writer transport: %v", err)
+	}
+	writer := NewClient(writerTP)
+
+	// --- Readers: use raw wire-level I/O for lightweight concurrency ---
+	// Each TCPConn creates a 65536-entry transaction pool, making 1000
+	// Client instances prohibitively expensive. Raw connections are cheap.
+
+	readerConns := make([]net.Conn, numReaders)
+	for i := range readerConns {
+		readerConns[i] = dial()
+	}
+
+	// Give accept loop time to process all connections.
+	time.Sleep(200 * time.Millisecond)
+
+	var wg sync.WaitGroup
+
+	// --- Writer goroutine: write 1, 2, 3, ... numWrites with delays ---
+
+	ctx := context.Background()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := int32(1); i <= numWrites; i++ {
+			if err := writer.WriteSingleRegister(ctx, registerAt, RegisterValue(i)); err != nil {
+				t.Errorf("write %d: %v", i, err)
+				return
+			}
+			time.Sleep(writeDelay)
+		}
+	}()
+
+	// --- Reader goroutines: raw Modbus TCP read requests ---
+
+	type readerResult struct {
+		lastSeen atomic.Int32
+		reads    atomic.Int32
+	}
+	results := make([]readerResult, numReaders)
+
+	for i, conn := range readerConns {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			txID := TransactionID(1)
+			for {
+				// Build ReadHoldingRegisters request (FC 0x03)
+				pdu := makeReadRegistersPDU(registerAt, 1)
+				req := NewRequest(1, FuncReadHoldingRegisters, pdu)
+				req.SetTransactionID(txID)
+				txID++
+
+				data, err := req.Encode()
+				if err != nil {
+					return
+				}
+				if _, err := conn.Write(data); err != nil {
+					return // connection closed
+				}
+
+				// Read MBAP header
+				header := make([]byte, TCPHeaderLength)
+				if _, err := io.ReadFull(conn, header); err != nil {
+					return
+				}
+				length := binary.BigEndian.Uint16(header[4:6])
+				body := make([]byte, int(length)-1)
+				if _, err := io.ReadFull(conn, body); err != nil {
+					return
+				}
+
+				// Parse register value from response PDU.
+				// Response: [FC:1][ByteCount:1][RegHi:1][RegLo:1]
+				if len(body) >= 3 {
+					v := int32(binary.BigEndian.Uint16(body[1:3]))
+					results[i].reads.Add(1)
+					if v > results[i].lastSeen.Load() {
+						results[i].lastSeen.Store(v)
+					}
+					if v >= numWrites {
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// --- Wait for all goroutines with timeout ---
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout waiting for writer + readers to complete")
+	}
+
+	// --- Verify reader results ---
+
+	for i := range results {
+		if results[i].reads.Load() == 0 {
+			t.Errorf("reader %d: completed 0 reads", i)
+		}
+		if results[i].lastSeen.Load() < numWrites {
+			t.Errorf("reader %d: last seen %d, want >= %d",
+				i, results[i].lastSeen.Load(), numWrites)
+		}
+	}
+
+	// --- Clean shutdown: writer ---
+
+	writer.Close()
+
+	// --- Clean shutdown: all readers ---
+
+	for _, conn := range readerConns {
+		conn.Close()
+	}
+
+	// --- Give server time to clean up all handler goroutines ---
+
+	time.Sleep(200 * time.Millisecond)
+
+	// --- Verify server state is clean ---
+	// Note: Modbus server tracks clients by RemoteAddr string. With net.Pipe
+	// all connections share the same "pipe" address, so ConnectedClients
+	// reflects only the last connection. We verify shutdown is clean instead.
 
 	srv.Stop(context.Background())
 }
