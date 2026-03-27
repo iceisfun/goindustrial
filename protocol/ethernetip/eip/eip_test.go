@@ -673,3 +673,263 @@ func TestHeaderMaxValues(t *testing.T) {
 		t.Error("session handle not preserved at max value")
 	}
 }
+
+// ===========================================================================
+// Tests mined from cpppo (https://github.com/pjkundert/cpppo)
+// Real Wireshark captures from cpppo's enip_test.py
+// ===========================================================================
+
+func TestDecodeRegisterSessionRequest(t *testing.T) {
+	// rss_004_request: Register Session request captured from real PLC
+	// "4","0.000863000","192.168.222.128","10.220.104.180","ENIP","82","Register Session (Req)"
+	raw := []byte{
+		0x65, 0x00, // Command: Register Session
+		0x04, 0x00, // Length: 4
+		0x00, 0x00, 0x00, 0x00, // Session Handle: 0
+		0x00, 0x00, 0x00, 0x00, // Status: 0
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Sender Context
+		0x00, 0x00, 0x00, 0x00, // Options: 0
+	}
+	h := &EncapsulationHeader{}
+	if err := h.Decode(bytes.NewReader(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if h.Command != CommandRegisterSession {
+		t.Fatalf("command: got 0x%04X, want RegisterSession (0x%04X)", h.Command, CommandRegisterSession)
+	}
+	if h.Length != 4 {
+		t.Fatalf("length: got %d, want 4", h.Length)
+	}
+	if h.SessionHandle != 0 {
+		t.Fatalf("session handle: got 0x%08X, want 0 (new session)", h.SessionHandle)
+	}
+}
+
+func TestDecodeRegisterSessionReply(t *testing.T) {
+	// rss_004_reply: Register Session reply from real Logix PLC
+	// Session handle assigned: 0x11021e01
+	raw := []byte{
+		0x65, 0x00, // Command: Register Session
+		0x04, 0x00, // Length: 4
+		0x01, 0x1e, 0x02, 0x11, // Session Handle: 0x11021e01
+		0x00, 0x00, 0x00, 0x00, // Status: 0 (success)
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Sender Context
+		0x00, 0x00, 0x00, 0x00, // Options
+	}
+	h := &EncapsulationHeader{}
+	if err := h.Decode(bytes.NewReader(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if h.Command != CommandRegisterSession {
+		t.Fatalf("command: got 0x%04X, want RegisterSession", h.Command)
+	}
+	if h.SessionHandle != 0x11021e01 {
+		t.Fatalf("session handle: got 0x%08X, want 0x11021E01", h.SessionHandle)
+	}
+	if h.Status != 0 {
+		t.Fatalf("status: got 0x%08X, want 0 (success)", h.Status)
+	}
+}
+
+func TestDecodeSendRRDataRequest(t *testing.T) {
+	// gaa_008_request: SendRRData with Get Attribute All
+	// "8","0.153249000","192.168.222.128","10.220.104.180","CIP","100","Get Attribute All"
+	raw := []byte{
+		0x6f, 0x00, // Command: SendRRData
+		0x16, 0x00, // Length: 22
+		0x01, 0x1e, 0x02, 0x11, // Session Handle: 0x11021e01
+		0x00, 0x00, 0x00, 0x00, // Status
+		0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Sender Context
+		0x00, 0x00, 0x00, 0x00, // Options
+	}
+	h := &EncapsulationHeader{}
+	if err := h.Decode(bytes.NewReader(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if h.Command != CommandSendRRData {
+		t.Fatalf("command: got 0x%04X, want SendRRData (0x%04X)", h.Command, CommandSendRRData)
+	}
+	if h.Length != 22 {
+		t.Fatalf("length: got %d, want 22", h.Length)
+	}
+	if h.SessionHandle != 0x11021e01 {
+		t.Fatalf("session handle: got 0x%08X, want 0x11021E01", h.SessionHandle)
+	}
+}
+
+func TestDecodeGetAttributeAllReply(t *testing.T) {
+	// gaa_011_reply: SendRRData reply with device identity "1756-L61/B LOGIX5561"
+	raw := []byte{
+		0x6f, 0x00, // Command: SendRRData
+		0x37, 0x00, // Length: 55
+		0x01, 0x1e, 0x02, 0x11, // Session Handle
+		0x00, 0x00, 0x00, 0x00, // Status: 0 (success)
+		0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Sender Context
+		0x00, 0x00, 0x00, 0x00, // Options
+	}
+	h := &EncapsulationHeader{}
+	if err := h.Decode(bytes.NewReader(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if h.Command != CommandSendRRData {
+		t.Fatalf("command: got 0x%04X, want SendRRData", h.Command)
+	}
+	if h.Length != 0x37 {
+		t.Fatalf("length: got %d, want 55", h.Length)
+	}
+	// Sender context should be {0x02, 0x00, ...} — incremented per request in capture
+	if h.SenderContext[0] != 0x02 {
+		t.Fatalf("sender context[0]: got 0x%02X, want 0x02", h.SenderContext[0])
+	}
+}
+
+func TestDecodeReadTagFragmentedError(t *testing.T) {
+	// rfg_001_reply: Read Tag Fragmented error 0x05
+	raw := []byte{
+		0x6f, 0x00, // Command: SendRRData
+		0x14, 0x00, // Length: 20
+		0x02, 0x67, 0x02, 0x10, // Session Handle
+		0x00, 0x00, 0x00, 0x00, // Status: 0 (EIP level success; CIP error inside)
+		0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Sender Context
+		0x00, 0x00, 0x00, 0x00, // Options
+	}
+	h := &EncapsulationHeader{}
+	if err := h.Decode(bytes.NewReader(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if h.Command != CommandSendRRData {
+		t.Fatalf("command: got 0x%04X, want SendRRData", h.Command)
+	}
+	// EIP-level status is success even when CIP-level has an error
+	if h.Status != 0 {
+		t.Fatalf("EIP status: got 0x%08X, want 0 (CIP error is in payload)", h.Status)
+	}
+	if h.SessionHandle != 0x10026702 {
+		t.Fatalf("session handle: got 0x%08X, want 0x10026702", h.SessionHandle)
+	}
+}
+
+func TestDecodeCPFUnconnectedSend(t *testing.T) {
+	// gaa_008_request CPF portion (after EIP header + interface/timeout):
+	// Item count=2, NullAddr(0x0000)+Unconnected(0x00B2)
+	cpfData := []byte{
+		0x02, 0x00, // Item count: 2
+		0x00, 0x00, // Item 1: Null Address
+		0x00, 0x00, // Item 1: Length 0
+		0xb2, 0x00, // Item 2: Unconnected Message (0x00B2)
+		0x06, 0x00, // Item 2: Length 6
+		0x01,             // CIP service: Get Attribute All
+		0x02,             // Path size: 2 words
+		0x20, 0x66,       // Class 0x66
+		0x24, 0x01,       // Instance 1
+	}
+
+	cpf, err := DecodeCommonPacketFormat(cpfData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cpf.Items) != 2 {
+		t.Fatalf("item count: got %d, want 2", len(cpf.Items))
+	}
+	if cpf.Items[0].TypeID != ItemIDNullAddress {
+		t.Fatalf("item 0 type: got 0x%04X, want NullAddress (0x0000)", cpf.Items[0].TypeID)
+	}
+	if cpf.Items[0].Length != 0 {
+		t.Fatalf("item 0 length: got %d, want 0", cpf.Items[0].Length)
+	}
+	if cpf.Items[1].TypeID != ItemIDUnconnectedMessage {
+		t.Fatalf("item 1 type: got 0x%04X, want UnconnectedMessage (0x00B2)", cpf.Items[1].TypeID)
+	}
+	if cpf.Items[1].Length != 6 {
+		t.Fatalf("item 1 length: got %d, want 6", cpf.Items[1].Length)
+	}
+	// Verify the CIP data inside the unconnected message item
+	if len(cpf.Items[1].Data) != 6 {
+		t.Fatalf("item 1 data length: got %d, want 6", len(cpf.Items[1].Data))
+	}
+	if cpf.Items[1].Data[0] != 0x01 { // Get Attribute All service
+		t.Fatalf("CIP service: got 0x%02X, want 0x01 (Get Attribute All)", cpf.Items[1].Data[0])
+	}
+}
+
+func TestDecodeCPFSendRRDataReply(t *testing.T) {
+	// gaa_008_reply CPF portion — response with CIP data
+	cpfData := []byte{
+		0x02, 0x00, // Item count: 2
+		0x00, 0x00, // Null Address
+		0x00, 0x00, // Length 0
+		0xb2, 0x00, // Unconnected Message
+		0x16, 0x00, // Length 22
+		// CIP response data follows (22 bytes)
+		0x81, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+		0x00, 0x00, 0x2d, 0x00, 0x01, 0x00, 0x01, 0x01,
+		0xb1, 0x2a, 0x1b, 0x00, 0x0a, 0x00,
+	}
+
+	cpf, err := DecodeCommonPacketFormat(cpfData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cpf.Items) != 2 {
+		t.Fatalf("item count: got %d, want 2", len(cpf.Items))
+	}
+	if cpf.Items[1].Length != 22 {
+		t.Fatalf("item 1 length: got %d, want 22", cpf.Items[1].Length)
+	}
+	// First byte of CIP reply: service 0x81 = Get Attribute All response (0x01 | 0x80)
+	if cpf.Items[1].Data[0] != 0x81 {
+		t.Fatalf("CIP reply service: got 0x%02X, want 0x81", cpf.Items[1].Data[0])
+	}
+}
+
+func TestRegisterSessionDataPayload(t *testing.T) {
+	// Register Session payload is 4 bytes: protocol version 1, options 0
+	// rss_004_request last 4 bytes: 0x01, 0x00, 0x00, 0x00
+	rsd := &RegisterSessionData{
+		ProtocolVersion: 1,
+		OptionsFlags:    0,
+	}
+	encoded, err := rsd.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := []byte{0x01, 0x00, 0x00, 0x00}
+	if !bytes.Equal(encoded, expected) {
+		t.Fatalf("RegisterSessionData: got %X, want %X", encoded, expected)
+	}
+}
+
+func TestEIPCommandCodes(t *testing.T) {
+	// Verify command codes match expected values
+	if CommandRegisterSession != 0x0065 {
+		t.Fatalf("CommandRegisterSession: got 0x%04X, want 0x0065", CommandRegisterSession)
+	}
+	if CommandSendRRData != 0x006F {
+		t.Fatalf("CommandSendRRData: got 0x%04X, want 0x006F", CommandSendRRData)
+	}
+	if CommandListIdentity != 0x0063 {
+		t.Fatalf("CommandListIdentity: got 0x%04X, want 0x0063", CommandListIdentity)
+	}
+	if CommandListServices != 0x0004 {
+		t.Fatalf("CommandListServices: got 0x%04X, want 0x0004", CommandListServices)
+	}
+	if CommandNop != 0x0000 {
+		t.Fatalf("CommandNop: got 0x%04X, want 0x0000", CommandNop)
+	}
+}
+
+func TestCPFItemIDs(t *testing.T) {
+	// Verify CPF item type IDs match expected values
+	if ItemIDNullAddress != 0x0000 {
+		t.Fatalf("ItemIDNullAddress: got 0x%04X, want 0x0000", ItemIDNullAddress)
+	}
+	if ItemIDUnconnectedMessage != 0x00B2 {
+		t.Fatalf("ItemIDUnconnectedMessage: got 0x%04X, want 0x00B2", ItemIDUnconnectedMessage)
+	}
+	if ItemIDConnectedTransport != 0x00B1 {
+		t.Fatalf("ItemIDConnectedTransport: got 0x%04X, want 0x00B1", ItemIDConnectedTransport)
+	}
+	if ItemIDConnectionBased != 0x00A1 {
+		t.Fatalf("ItemIDConnectionBased: got 0x%04X, want 0x00A1", ItemIDConnectionBased)
+	}
+}
