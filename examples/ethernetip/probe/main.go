@@ -151,12 +151,14 @@ func main() {
 	}
 
 	// Attribute 5: Interface config (IP, mask, gateway)
+	// CIP stores IPs as UDINTs in little-endian, so bytes are reversed
+	// compared to network byte order. Swap to get a valid net.IP.
 	resp, err = cipReq(cip.ServiceGetAttributeSingle, cip.BuildPath(0xF5, 1, 5), nil)
 	if err == nil && resp.IsSuccess() && len(resp.ResponseData) >= 12 {
 		d := resp.ResponseData
-		ip := net.IP(d[0:4])
-		mask := net.IP(d[4:8])
-		gw := net.IP(d[8:12])
+		ip := net.IP{d[3], d[2], d[1], d[0]}
+		mask := net.IP{d[7], d[6], d[5], d[4]}
+		gw := net.IP{d[11], d[10], d[9], d[8]}
 		fmt.Printf("  IP Address:      %s\n", ip)
 		fmt.Printf("  Subnet Mask:     %s\n", mask)
 		fmt.Printf("  Gateway:         %s\n", gw)
