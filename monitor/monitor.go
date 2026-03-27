@@ -197,6 +197,12 @@ func (m *Monitor) Subscribe(point plc.DataPoint, opts ...SubscriptionOption) (*S
 	m.wg.Add(1)
 	m.mu.Unlock()
 
+	// If the reader supports registration, tell it about the new point
+	// so it can optimize read plans (e.g., clustering).
+	if reg, ok := m.reader.(Registrar); ok {
+		reg.Register(point)
+	}
+
 	go func() {
 		defer m.wg.Done()
 		sub.run()
@@ -214,6 +220,9 @@ func (m *Monitor) removeSubscription(id int64) {
 	m.mu.Unlock()
 
 	if ok {
+		if reg, ok := m.reader.(Registrar); ok {
+			reg.Unregister(sub.point)
+		}
 		sub.stop()
 	}
 }
