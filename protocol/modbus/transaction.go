@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/iceisfun/goindustrial/logging"
@@ -72,11 +73,12 @@ func (t *Transaction) GetLifetime() time.Duration {
 // ---------------------------------------------------------------------------
 
 const (
-	// MaxTransactions is the maximum number of possible transaction IDs such
-	// that the buffered channel never blocks.
-	MaxTransactions = 0xFFFF + 1
 	// DefaultTransactionTimeout is the default timeout for transactions.
 	DefaultTransactionTimeout = 5 * time.Second
+
+	// maxIDAttempts is the number of IDs to try before giving up when
+	// there is a collision with an in-flight transaction.
+	maxIDAttempts = 16
 )
 
 // TransactionPool manages a pool of active Modbus TCP transactions.
@@ -84,7 +86,7 @@ type TransactionPool struct {
 	logger          logging.Logger
 	transactions    map[TransactionID]*Transaction
 	transactionsMu  sync.Mutex
-	freeIDs         chan TransactionID
+	nextID          atomic.Uint32
 	done            chan struct{}
 	timeoutDuration time.Duration
 }
@@ -113,18 +115,12 @@ func NewTransactionPool(options ...TransactionPoolOption) *TransactionPool {
 	pool := &TransactionPool{
 		logger:          logging.NewNopLogger(),
 		transactions:    make(map[TransactionID]*Transaction),
-		freeIDs:         make(chan TransactionID, MaxTransactions),
 		done:            make(chan struct{}),
 		timeoutDuration: DefaultTransactionTimeout,
 	}
 
 	for _, option := range options {
 		option(pool)
-	}
-
-	// Pre-populate the free IDs channel.
-	for i := 0; i < MaxTransactions; i++ {
-		pool.freeIDs <- TransactionID(i)
 	}
 
 	// Start the timeout monitor goroutine.
@@ -148,23 +144,6 @@ func (tp *TransactionPool) Close() {
 	default:
 		close(tp.done)
 	}
-
-	// Safely close freeIDs channel.
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// Channel was already closed.
-			}
-		}()
-		select {
-		case _, ok := <-tp.freeIDs:
-			if ok {
-				close(tp.freeIDs)
-			}
-		default:
-			close(tp.freeIDs)
-		}
-	}()
 
 	// Cancel all pending transactions.
 	for txID, t := range tp.transactions {
@@ -215,26 +194,31 @@ func (tp *TransactionPool) GetCount() int {
 
 // Place adds a transaction to the pool and assigns it a transaction ID.
 func (tp *TransactionPool) Place(ctx context.Context, request *Request) (*Transaction, error) {
-	var txID TransactionID
-	var ok bool
-
-	select {
-	case txID, ok = <-tp.freeIDs:
-		if !ok {
-			return nil, fmt.Errorf("freeIDs channel closed, pool is likely shutting down")
-		}
-	default:
-		return nil, fmt.Errorf("transaction pool is full (no IDs in free list)")
-	}
-
 	tp.transactionsMu.Lock()
 	defer tp.transactionsMu.Unlock()
 
-	// Check if the pool was closed between receiving the free ID and acquiring the lock.
+	// Check if the pool was closed.
 	select {
 	case <-tp.done:
 		return nil, fmt.Errorf("transaction pool is closed")
 	default:
+	}
+
+	// Try to find a free transaction ID.
+	var txID TransactionID
+	found := false
+	for i := 0; i < maxIDAttempts; i++ {
+		id := tp.nextID.Add(1) - 1 // post-increment semantics
+		candidate := TransactionID(id & 0xFFFF)
+		if _, exists := tp.transactions[candidate]; !exists {
+			txID = candidate
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return nil, fmt.Errorf("transaction pool is full (no free IDs after %d attempts)", maxIDAttempts)
 	}
 
 	request.SetTransactionID(txID)
@@ -272,19 +256,6 @@ func (tp *TransactionPool) Release(txID TransactionID) (result *Transaction, ok 
 // unsafeRelease removes a transaction without locking. Caller must hold transactionsMu.
 func (tp *TransactionPool) unsafeRelease(txID TransactionID) {
 	delete(tp.transactions, txID)
-
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				// Channel was closed.
-			}
-		}()
-
-		select {
-		case tp.freeIDs <- txID:
-		default:
-		}
-	}()
 }
 
 // unsafeReset cancels all transactions and re-initialises the pool.
@@ -300,9 +271,4 @@ func (tp *TransactionPool) unsafeReset() {
 	}
 
 	tp.transactions = make(map[TransactionID]*Transaction)
-	tp.freeIDs = make(chan TransactionID, MaxTransactions)
-
-	for i := range MaxTransactions {
-		tp.freeIDs <- TransactionID(i)
-	}
 }
