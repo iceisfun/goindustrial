@@ -104,8 +104,13 @@ func (c *Client) Disconnect(ctx context.Context) error {
 	return c.transport.Close()
 }
 
-// IsConnected satisfies plc.PLC.
+// IsConnected satisfies plc.PLC. It does not attempt to establish a new
+// connection — it only checks existing state.
 func (c *Client) IsConnected() bool {
+	if p, ok := c.transport.(transport.Peeker); ok {
+		return p.Peek()
+	}
+	// Fallback for custom transports that don't implement Peeker.
 	conn, err := c.transport.Conn(context.Background())
 	if err != nil {
 		return false

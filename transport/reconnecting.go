@@ -73,6 +73,14 @@ func (r *ReconnectingTransport[C]) Conn(ctx context.Context) (C, error) {
 	return conn, nil
 }
 
+// Peek reports whether a connection is currently established without
+// attempting to create one. It implements the [Peeker] interface.
+func (r *ReconnectingTransport[C]) Peek() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return !r.closed && r.conn != r.zero
+}
+
 // Reset invalidates the connection if it matches stale, closing the
 // underlying session. The next Conn call will transparently establish a
 // new connection.

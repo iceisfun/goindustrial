@@ -47,6 +47,14 @@ type Transport[C any] interface {
 	Close() error
 }
 
+// Peeker is an optional interface implemented by transports that support
+// a non-blocking connection check. Unlike [Transport.Conn], Peek never
+// creates or dials a new connection — it only reports whether one already
+// exists.
+type Peeker interface {
+	Peek() bool
+}
+
 // ConnectorFunc adapts a plain function into a Connector.
 type ConnectorFunc[C any] func(ctx context.Context) (C, error)
 

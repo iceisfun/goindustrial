@@ -112,8 +112,13 @@ func (c *Client) Disconnect(_ context.Context) error {
 	return c.transport.Close()
 }
 
-// IsConnected returns true if a session is currently available.
+// IsConnected returns true if a session is currently available. It does not
+// attempt to establish a new connection — it only checks existing state.
 func (c *Client) IsConnected() bool {
+	if p, ok := c.transport.(transport.Peeker); ok {
+		return p.Peek()
+	}
+	// Fallback for custom transports that don't implement Peeker.
 	_, err := c.transport.Conn(context.Background())
 	return err == nil
 }

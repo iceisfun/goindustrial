@@ -2,7 +2,7 @@
 
 A unified Go library for industrial communication protocols. Consolidates **Modbus TCP** and **EtherNet/IP (CIP)** under common abstractions for transport, logging, monitoring, and PLC access.
 
-Zero external dependencies. Pure Go. Go 1.25+.
+Zero external dependencies for core protocols. Pure Go. Go 1.25+. The optional `lua/` package requires [GoLua](https://github.com/iceisfun/golua).
 
 ## Package Structure
 

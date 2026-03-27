@@ -15,11 +15,16 @@ import (
 // a session handle used to identify all subsequent requests. Use [NewSession]
 // and [Session.Register] to create one, or let [SessionConnector] do it
 // automatically.
+//
+// All methods that perform a send/receive exchange are serialized by an
+// internal mutex, so a Session is safe for concurrent use from multiple
+// goroutines.
 type Session struct {
 	conn   *TCPConn
 	handle eip.SessionHandle
 	logger logging.Logger
 	mu     sync.Mutex // protects handle
+	ioMu   sync.Mutex // serializes send/receive exchanges
 }
 
 // NewSession creates a new unregistered Session on top of the given [TCPConn].
@@ -43,6 +48,9 @@ func (s *Session) Register(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
 
 	s.logger.Info(ctx, "Sending RegisterSession command")
 	if err := s.conn.Send(eip.CommandRegisterSession, data, 0); err != nil {
@@ -107,6 +115,10 @@ func (s *Session) SendRRData(ctx context.Context, request []byte) ([]byte, error
 	s.mu.Lock()
 	handle := s.handle
 	s.mu.Unlock()
+
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+
 	s.logger.Debug(ctx, "Sending RRData (len=%d)", len(rrData))
 	if err := s.conn.Send(eip.CommandSendRRData, rrData, handle); err != nil {
 		return nil, err
@@ -166,6 +178,9 @@ func (s *Session) SendCIPRequest(ctx context.Context, req *cip.MessageRouterRequ
 // ListIdentity sends the EIP ListIdentity command and returns the identity
 // items reported by the remote device.
 func (s *Session) ListIdentity(ctx context.Context) ([]eip.ListIdentityItem, error) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+
 	s.logger.Info(ctx, "Sending ListIdentity command")
 	if err := s.conn.Send(eip.CommandListIdentity, nil, 0); err != nil {
 		return nil, err
@@ -187,6 +202,9 @@ func (s *Session) ListIdentity(ctx context.Context) ([]eip.ListIdentityItem, err
 // ListServices sends the EIP ListServices command and returns the service
 // items describing the communication capabilities of the remote device.
 func (s *Session) ListServices(ctx context.Context) ([]eip.ListServicesItem, error) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+
 	s.logger.Info(ctx, "Sending ListServices command")
 	if err := s.conn.Send(eip.CommandListServices, nil, 0); err != nil {
 		return nil, err

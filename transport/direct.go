@@ -58,6 +58,14 @@ func (d *DirectTransport[C]) Conn(ctx context.Context) (C, error) {
 	return d.conn, nil
 }
 
+// Peek reports whether a connection is currently active without side effects.
+// It implements the [Peeker] interface.
+func (d *DirectTransport[C]) Peek() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.active && !d.closed
+}
+
 // Reset invalidates the connection if it matches stale, closing the
 // underlying session. Subsequent Conn calls will return an error because
 // DirectTransport does not reconnect.

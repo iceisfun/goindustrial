@@ -120,6 +120,9 @@ func (r *Request) Decode(data []byte) error {
 
 	// Read PDU - Data (variable)
 	// Length field includes Unit ID (1) and Function Code (1)
+	if length < 2 {
+		return ErrInvalidRequestLength
+	}
 	pduData := make([]byte, length-2)
 	if _, err := io.ReadFull(buffer, pduData); err != nil {
 		return err

@@ -5,7 +5,7 @@ This example demonstrates the **monitor** package, which provides a unified way 
 ## What This Example Does
 
 1. Connects to a **Modbus TCP server** and an **EtherNet/IP server**
-2. Creates **two Monitor instances** (one per protocol)
+2. Creates **two Monitor instances** (one per protocol, since each monitor wraps a single `plc.Reader`)
 3. Subscribes to a Modbus holding register with change detection and a handler callback
 4. Subscribes to an EtherNet/IP tag with change detection and a handler callback
 5. Consumes events from **both** monitors in a unified event loop
@@ -183,7 +183,7 @@ cd examples/modbus/server && go run .
 cd examples/ethernetip/server && go run .
 
 # Terminal 3: Run the monitor
-cd examples/monitor && go run . \
+cd examples/monitor_polling && go run . \
   -modbus-addr 127.0.0.1 -modbus-port 502 \
   -eip-addr 127.0.0.1:44818 \
   -interval 1s

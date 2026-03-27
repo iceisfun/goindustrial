@@ -23,6 +23,10 @@ var (
 	// outside the valid 0-65535 range.
 	ErrInvalidAddress = errors.New("invalid address")
 
+	// ErrInvalidRequestLength is returned when a request MBAP length field
+	// is too short to contain the required unit ID and function code.
+	ErrInvalidRequestLength = errors.New("invalid request length")
+
 	// ErrInvalidResponseLength is returned when a response PDU has an
 	// unexpected byte count or overall length.
 	ErrInvalidResponseLength = errors.New("invalid response length")
