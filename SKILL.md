@@ -274,6 +274,7 @@ closer := modbus.NewTCPCloser()
 tp := transport.NewReconnectingTransport[*modbus.TCPConn](connector, closer,
     transport.WithOnConnect(func() { log.Println("connected") }),
     transport.WithOnDisconnect(func(err error) { log.Printf("disconnected: %v", err) }),
+    // Multiple callbacks may be registered; they fire in registration order.
 )
 
 client := modbus.NewClient(tp,
@@ -333,9 +334,16 @@ if modbus.IsModbusError(err) {
 The monitor polls any `plc.Reader` (both clients implement this) and emits events.
 
 ```go
+// Optional: gate polling until connected (channel closed by OnConnect hook)
+connected := make(chan struct{})
+tp := transport.NewReconnectingTransport[*modbus.TCPConn](connector, closer,
+    transport.WithOnConnect(func() { close(connected) }),
+)
+
 m, err := monitor.NewMonitor(client,
     monitor.WithLogger(logger),
     monitor.WithEventBuffer(128),
+    monitor.WithConnected(connected), // wait for PLC connection before polling
 )
 defer m.Close()
 
@@ -347,7 +355,7 @@ sub, err := m.Subscribe(modbus.HoldingRegister{Addr: 0, Qty: 10},
     monitor.WithHandler(func(snap monitor.Snapshot) {
         fmt.Printf("callback: %s = %x\n", snap.Point, snap.Value.Raw)
     }),
-    monitor.WithInitialRead(true),
+    monitor.WithInitialRead(0), // 0 = immediate; default is 50ms delay
 )
 
 // Consume the unified event channel
