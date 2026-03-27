@@ -31,9 +31,17 @@ func buildWindows(points []Clusterable, cfg ClusterConfig) []readWindow {
 		groups[k] = append(groups[k], p)
 	}
 
+	// Sort keys for deterministic window ordering across runs.
+	keys := make([]string, 0, len(groups))
+	for k := range groups {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
 	var windows []readWindow
 
-	for key, pts := range groups {
+	for _, key := range keys {
+		pts := groups[key]
 		// Sort ascending by address.
 		sort.Slice(pts, func(i, j int) bool {
 			return pts[i].ClusterAddr() < pts[j].ClusterAddr()
