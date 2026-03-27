@@ -1,6 +1,6 @@
 ---
 name: goindustrial
-description: Communicate with industrial PLCs using Modbus TCP and EtherNet/IP (CIP) via github.com/iceisfun/goindustrial. Covers client/server setup, register and tag operations, reconnection, monitoring, and protocol-agnostic PLC access.
+description: Communicate with industrial PLCs using Modbus TCP and EtherNet/IP (CIP) via github.com/iceisfun/goindustrial. Covers client/server setup, register and tag operations, reconnection, monitoring, protocol-agnostic PLC access, and optional GoLua scripting bindings.
 license: MIT
 compatibility: claude-code, opencode
 metadata:
@@ -29,6 +29,10 @@ SKILLS:
 - CIP data types: BOOL(0xC1), SINT(int8), INT(int16), DINT(int32), LINT(int64), USINT(uint8), UINT(uint16), UDINT(uint32), ULINT(uint64), REAL(float32), LREAL(float64), STRING(0xD0).
 - Error classification: Modbus protocol errors (IsModbusError) are not retried; transport errors trigger Reset + retry. Same pattern for EIP: cipError not retried, transport errors retried.
 - Servers: modbus.NewServer(addr, opts...) and ethernetip.NewServer(router, opts...). Both support net.Pipe injection for testing.
+- Optional Lua bindings (lua/ package, requires github.com/iceisfun/golua): industrialLua.Open(v) registers "modbus" and "eip" Lua globals.
+- Lua modbus API: modbus.connect(addr, opts) -> client, client:read_holding_registers(addr, qty), client:write_register(addr, val), etc.
+- Lua eip API: eip.connect(addr, opts) -> client, client:read_tag(name) -> auto-typed value, client:write_tag(name, val), client:list_tags(), etc.
+- Lua methods use colon syntax (client:method(args)); the self parameter is handled automatically.
 ```
 
 ## What You Usually Need To Know
@@ -471,15 +475,110 @@ srv.Start(ctx, "")
 conn, _ := ethernetip.NewTCPConn("", ethernetip.WithConn(clientConn))
 ```
 
+## Lua Scripting Bindings (Optional)
+
+The `lua/` package provides [GoLua](https://github.com/iceisfun/golua) bindings. Import it separately — the core library remains zero-dependency.
+
+```go
+import (
+    "github.com/iceisfun/golua/vm"
+    "github.com/iceisfun/golua/stdlib"
+    industrialLua "github.com/iceisfun/goindustrial/lua"
+)
+
+v := vm.New()
+stdlib.Open(v)
+industrialLua.Open(v) // registers "modbus" and "eip" Lua globals
+```
+
+### Lua Modbus API
+
+```lua
+local client = modbus.connect("192.168.1.10", {
+    port = 502, unit = 1, retries = 2, timeout = 5
+})
+
+local regs = client:read_holding_registers(0, 10)  -- table of ints
+local coils = client:read_coils(0, 8)               -- table of bools
+local inputs = client:read_input_registers(0, 5)
+local discrete = client:read_discrete_inputs(0, 8)
+
+client:write_register(100, 0x1234)
+client:write_registers(100, {10, 20, 30})
+client:write_coil(0, true)
+client:write_coils(0, {true, false, true})
+
+local result = client:read_write_registers(0, 5, 100, {42})
+
+-- Convert two registers to 32-bit values (big-endian)
+local int32_val = client:to_int32(regs[1], regs[2])
+local float32_val = client:to_float32(regs[1], regs[2])
+
+local dev = client:read_device_id()
+print(dev.vendor_name, dev.product_code, dev.revision)
+
+client:close()
+```
+
+### Lua EtherNet/IP API
+
+```lua
+local client = eip.connect("192.168.1.20:44818", {
+    retries = 2, timeout = 10
+})
+
+-- Auto-typed reads: returns int, float, bool, or string based on CIP type
+local val = client:read_tag("MyDINT")           -- returns integer
+local fval = client:read_tag("MyREAL")          -- returns float
+
+-- Batch read
+local values = client:read_tags({"Tag1", "Tag2", "Tag3"})
+
+-- Write with auto-detect or explicit type
+client:write_tag("MyDINT", 42)                  -- auto: DINT
+client:write_tag("MyREAL", 3.14)                -- auto: REAL
+client:write_tag("MyINT", 100, "INT")           -- explicit type
+
+-- Structured types
+local timer = client:read_timer("MyTimer")
+print(timer.pre, timer.acc, timer.en, timer.tt, timer.dn)
+
+local counter = client:read_counter("MyCounter")
+print(counter.pre, counter.acc, counter.cu, counter.dn)
+
+-- Tag discovery
+local tags = client:list_tags()
+for i = 1, #tags do
+    print(tags[i].id, tags[i].name, tags[i].type)
+end
+
+client:close()
+```
+
+### Error Handling in Lua
+
+All protocol errors raise Lua errors. Use `pcall` for safe calls:
+
+```lua
+local ok, err = pcall(function()
+    client:read_tag("NONEXISTENT_TAG")
+end)
+if not ok then
+    print("Error:", err)
+end
+```
+
 ## Examples
 
-19 runnable examples under `examples/` covering every operation, each with its own README:
+22 runnable examples under `examples/` covering every operation, each with its own README:
 
 **Modbus:** read_registers, write_registers, read_coils, write_coils, read_write_registers, device_identification, server, reconnecting, all_data_types
 
 **EtherNet/IP:** read_tag, write_tag, read_tag_typed, timer_counter, list_tags, list_identity, server, reconnecting
 
 **Cross-protocol:** monitor_polling, plc_interface
+
+**Lua scripting:** lua/modbus_client, lua/ethernetip_client, lua/monitor_tags
 
 Run any example:
 
@@ -503,5 +602,8 @@ Good defaults:
 - `WithRetries(-1)` means infinite retries for long-running applications.
 - Both servers support `WithServerConn(net.Conn)` for deterministic in-process testing with `net.Pipe`.
 - The monitor works with any `plc.Reader` -- you can poll Modbus and EtherNet/IP through the same monitor.
+
+- For Lua bindings, `industrialLua.Open(v)` registers both `modbus` and `eip` globals. Lua methods use colon syntax (`client:read_tag("name")`); the self parameter is handled automatically.
+- Lua errors from protocol operations are raised via panic and caught by pcall in Lua.
 
 The goal of this skill is to help an assistant build correct integrations quickly using the public API.

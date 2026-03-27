@@ -20,6 +20,7 @@ goindustrial/
     protocol/ethernetip/objects/ CIP objects (Assembly, Connection Manager)
     protocol/ethernetip/runtime/ UDP I/O for implicit messaging
 
+    lua/                         Optional GoLua bindings (requires github.com/iceisfun/golua)
     examples/                    Runnable examples with READMEs (see below)
 ```
 
@@ -105,6 +106,36 @@ for evt := range m.Events() {
 }
 ```
 
+### Lua Scripting (Optional)
+
+The `lua/` package provides [GoLua](https://github.com/iceisfun/golua) bindings so Lua scripts can drive Modbus and EtherNet/IP operations. This is useful for user-configurable data collection, alerting, and transformation logic without recompiling Go code.
+
+```go
+import (
+    "github.com/iceisfun/golua/vm"
+    "github.com/iceisfun/golua/stdlib"
+    industrialLua "github.com/iceisfun/goindustrial/lua"
+)
+
+v := vm.New()
+stdlib.Open(v)
+industrialLua.Open(v) // registers "modbus" and "eip" globals
+```
+
+```lua
+-- Read Modbus registers
+local client = modbus.connect("192.168.1.10", {port = 502, unit = 1})
+local regs = client:read_holding_registers(0, 10)
+for i = 1, #regs do print(regs[i]) end
+client:close()
+
+-- Read EtherNet/IP tags
+local plc = eip.connect("192.168.1.20:44818")
+local val = plc:read_tag("MyDINT")
+print("MyDINT =", val)
+plc:close()
+```
+
 ## Architecture
 
 ### Shared Infrastructure
@@ -185,6 +216,14 @@ Every example is a standalone `main.go` with its own README explaining the relev
 |---------|-------------|
 | [`monitor_polling`](examples/monitor_polling/) | Poll Modbus + EtherNet/IP through a unified Monitor with change detection |
 | [`plc_interface`](examples/plc_interface/) | Protocol-agnostic code using the `plc.PLC` interface |
+
+### Lua Scripting
+
+| Example | Description |
+|---------|-------------|
+| [`lua/modbus_client`](examples/lua/modbus_client/) | Read/write Modbus registers from Lua scripts |
+| [`lua/ethernetip_client`](examples/lua/ethernetip_client/) | Read/write EtherNet/IP tags from Lua with tag discovery |
+| [`lua/monitor_tags`](examples/lua/monitor_tags/) | Lua-driven tag polling with change detection |
 
 Run any example:
 
