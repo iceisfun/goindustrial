@@ -106,7 +106,7 @@ type ModbusError struct {
 // Error implements the error interface.
 func (e *ModbusError) Error() string {
 	return fmt.Sprintf("modbus: exception response: function: %s, exception code: %#x (%s)",
-		e.FunctionCode, e.ExceptionCode, GetExceptionString(e.ExceptionCode))
+		e.FunctionCode, byte(e.ExceptionCode), GetExceptionString(e.ExceptionCode))
 }
 
 // IsModbusError reports whether err is a [ModbusError] (a protocol-level
@@ -171,6 +171,6 @@ func GetExceptionString(exceptionCode ExceptionCode) string {
 		// Ref: Modbus_Application_Protocol_V1_1b3.pdf, Section 7.10
 		return "gateway target no response"
 	default:
-		return fmt.Sprintf("unknown exception code: %#x", exceptionCode)
+		return fmt.Sprintf("unknown exception code: %#x", byte(exceptionCode))
 	}
 }
