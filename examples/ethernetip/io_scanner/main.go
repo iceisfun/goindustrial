@@ -136,11 +136,16 @@ func main() {
 
 	fmt.Printf("\nSending Forward_Open...\n")
 
-	// Build the connection path. For a Logix PLC, the standard path uses
-	// connection point segments to identify the O→T and T→O assemblies.
+	// Build the connection path.
+	// Standard CIP: [Class 0x04] [Instance <config>] [ConnPt <OT>] [ConnPt <TO>]
+	// If no config assembly, omit the instance segment.
 	connPath := cip.NewPath()
 	connPath.AddClass(cip.ClassAssembly)
-	connPath.AddInstance(cip.UINT(*cfgInstance))
+	if *cfgInstance > 0 {
+		connPath.AddInstance(cip.UINT(*cfgInstance))
+	} else {
+		connPath.AddInstance(1) // default config instance
+	}
 	connPath.AddConnectionPoint(cip.UINT(*otInstance))
 	connPath.AddConnectionPoint(cip.UINT(*toInstance))
 
