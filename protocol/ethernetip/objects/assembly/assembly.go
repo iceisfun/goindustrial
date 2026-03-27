@@ -26,6 +26,13 @@ func NewAssemblyObject() *AssemblyObject {
 	}
 }
 
+// GetInstance returns the AssemblyInstance for the given ID, or nil if not found.
+func (ao *AssemblyObject) GetInstance(instanceID uint32) *AssemblyInstance {
+	ao.mu.RLock()
+	defer ao.mu.RUnlock()
+	return ao.instances[instanceID]
+}
+
 // RegisterAssembly registers a new assembly instance
 func (ao *AssemblyObject) RegisterAssembly(instanceID uint32, data []byte) {
 	ao.mu.Lock()

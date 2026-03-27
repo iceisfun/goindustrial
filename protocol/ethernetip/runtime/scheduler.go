@@ -78,8 +78,10 @@ func (s *Scheduler) processTick() {
 		conn.SequenceCount++
 		conn.LastSend = now
 
-		dataCopy := make([]byte, len(conn.Assembly.Data))
-		copy(dataCopy, conn.Assembly.Data)
+		dataCopy, err := s.runtime.assemblyObj.GetAttributeSingle(conn.Assembly.ID, 3)
+		if err != nil {
+			continue
+		}
 
 		snapshots = append(snapshots, connSnapshot{
 			ConnectionID:  conn.ConnectionID,

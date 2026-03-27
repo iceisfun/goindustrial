@@ -78,11 +78,40 @@ func (r *Runtime) AddConnection(conn *IOConnection) {
 	r.connections[conn.ConnectionID] = conn
 }
 
-// RemoveConnection removes a connection from the runtime
+// RemoveConnection removes a connection from the runtime and signals its
+// StopChan so that any associated goroutine exits.
 func (r *Runtime) RemoveConnection(connID uint32) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	conn := r.connections[connID]
 	delete(r.connections, connID)
+	r.mu.Unlock()
+
+	if conn != nil && conn.StopChan != nil {
+		select {
+		case <-conn.StopChan:
+		default:
+			close(conn.StopChan)
+		}
+	}
+}
+
+// Addr returns the local UDP address the runtime is listening on.
+// Useful for tests to discover the ephemeral port.
+func (r *Runtime) Addr() *net.UDPAddr {
+	if r.conn != nil {
+		return r.conn.LocalAddr().(*net.UDPAddr)
+	}
+	return nil
+}
+
+// SetProducerAddr sets the remote UDP address for a producer connection.
+// This tells the scheduler where to send packets for this connection.
+func (r *Runtime) SetProducerAddr(connID uint32, addr *net.UDPAddr) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if conn, ok := r.connections[connID]; ok {
+		conn.RemoteAddr = addr
+	}
 }
 
 // watchdogLoop checks for connection timeouts
@@ -114,6 +143,13 @@ func (r *Runtime) checkTimeouts() {
 		timeout := conn.RPI * time.Duration(mult)
 
 		if now.Sub(conn.LastReceive) > timeout {
+			if conn.StopChan != nil {
+				select {
+				case <-conn.StopChan:
+				default:
+					close(conn.StopChan)
+				}
+			}
 			delete(r.connections, id)
 		}
 	}
@@ -193,12 +229,16 @@ func (r *Runtime) handlePacket(data []byte, remoteAddr *net.UDPAddr) {
 	asm := conn.Assembly
 	r.mu.Unlock()
 
-	dataOffset := 0
+	// Class 1 data always starts with a 2-byte sequence count.
+	dataOffset := 2
+	if len(payload) < dataOffset {
+		return
+	}
 	if runIdleHeader {
-		if len(payload) < 4 {
+		dataOffset += 4 // skip 4-byte run/idle header
+		if len(payload) < dataOffset {
 			return
 		}
-		dataOffset = 4
 	}
 
 	if asm != nil {
