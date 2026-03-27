@@ -32,6 +32,36 @@ func (r *MessageRouterRequest) Encode() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// DecodeMessageRouterRequest decodes a byte slice into a MessageRouterRequest.
+// This is the inverse of Encode: [Service:1][PathSizeWords:1][Path...][RequestData...].
+func DecodeMessageRouterRequest(data []byte) (*MessageRouterRequest, error) {
+	r := &MessageRouterRequest{}
+	buf := bytes.NewReader(data)
+
+	if err := binary.Read(buf, binary.LittleEndian, &r.Service); err != nil {
+		return nil, err
+	}
+	var pathSizeWords uint8
+	if err := binary.Read(buf, binary.LittleEndian, &pathSizeWords); err != nil {
+		return nil, err
+	}
+	pathBytes := make([]byte, int(pathSizeWords)*2)
+	if _, err := buf.Read(pathBytes); err != nil {
+		return nil, err
+	}
+	r.RequestPath = Path(pathBytes)
+
+	remaining := buf.Len()
+	if remaining > 0 {
+		r.RequestData = make([]byte, remaining)
+		if _, err := buf.Read(r.RequestData); err != nil {
+			return nil, err
+		}
+	}
+
+	return r, nil
+}
+
 // MessageRouterResponse represents a response from the Message Router Object
 type MessageRouterResponse struct {
 	Service       USINT // Reply Service (Request Service | 0x80)
@@ -40,6 +70,20 @@ type MessageRouterResponse struct {
 	ExtStatusSize USINT
 	ExtStatus     []UINT
 	ResponseData  []byte
+}
+
+// Encode encodes the response into a byte slice.
+func (r *MessageRouterResponse) Encode() ([]byte, error) {
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.LittleEndian, r.Service)
+	binary.Write(buf, binary.LittleEndian, r.Reserved)
+	binary.Write(buf, binary.LittleEndian, r.GeneralStatus)
+	binary.Write(buf, binary.LittleEndian, r.ExtStatusSize)
+	for _, ext := range r.ExtStatus {
+		binary.Write(buf, binary.LittleEndian, ext)
+	}
+	buf.Write(r.ResponseData)
+	return buf.Bytes(), nil
 }
 
 // DecodeMessageRouterResponse decodes a byte slice into a MessageRouterResponse
