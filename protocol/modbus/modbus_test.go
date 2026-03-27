@@ -2960,3 +2960,74 @@ func TestStressConcurrentClients(t *testing.T) {
 
 	srv.Stop(context.Background())
 }
+
+// TestServerShutdownDrain verifies that Stop() actively closes all tracked
+// client connections, causing handler goroutines to exit cleanly.
+func TestServerShutdownDrain(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+
+	store := NewMemoryStore()
+	store.SetHoldingRegister(0, 0x1234)
+
+	srv := NewServer("test",
+		WithServerDataStore(store),
+		WithServerConn(serverConn),
+	)
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+
+	// Verify the server is running and the client is connected.
+	if !srv.IsRunning() {
+		t.Fatal("server should be running")
+	}
+
+	// Give handleConnection time to start.
+	time.Sleep(50 * time.Millisecond)
+
+	// Perform a request to prove the connection is fully active.
+	sendRawRequest(t, clientConn, 1, 1, FuncReadHoldingRegisters, makeReadRegistersPDU(0, 1))
+	resp := readRawResponse(t, clientConn)
+	if resp.GetPDU().FunctionCode != FuncReadHoldingRegisters {
+		t.Fatalf("unexpected function code: %s", resp.GetPDU().FunctionCode)
+	}
+
+	// Start a goroutine that blocks on Read — it should unblock when Stop()
+	// closes the connection.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var readErr error
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1)
+		_, readErr = clientConn.Read(buf)
+	}()
+
+	// Stop the server — this should close the client connection.
+	srv.Stop(context.Background())
+
+	if srv.IsRunning() {
+		t.Fatal("server should not be running after Stop")
+	}
+
+	// Wait for the blocked Read to unblock.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler goroutine did not exit within timeout after Stop()")
+	}
+
+	// The read should have returned an error (pipe closed).
+	if readErr == nil {
+		t.Error("expected read error after Stop(), got nil")
+	}
+
+	// Clean up.
+	clientConn.Close()
+}

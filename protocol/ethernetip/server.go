@@ -138,7 +138,8 @@ func (s *Server) Start(ctx context.Context, address string) error {
 	return nil
 }
 
-// Stop gracefully stops the server.
+// Stop gracefully stops the server. It closes the listener and all tracked
+// client connections so that HandleConn goroutines exit cleanly.
 func (s *Server) Stop() error {
 	select {
 	case <-s.done:
@@ -146,13 +147,26 @@ func (s *Server) Stop() error {
 	default:
 	}
 	close(s.done)
+
+	// Close listener first to stop accepting new connections.
+	var firstErr error
 	if s.ln != nil {
-		return s.ln.Close()
+		firstErr = s.ln.Close()
 	}
+
+	// Close all tracked client connections so HandleConn goroutines unblock.
+	s.clientsMu.Lock()
+	for conn := range s.clients {
+		conn.Close()
+	}
+	s.clientsMu.Unlock()
+
+	// Also close the injected conn in case it was not yet tracked.
 	if s.injectedConn != nil {
-		return s.injectedConn.Close()
+		s.injectedConn.Close()
 	}
-	return nil
+
+	return firstErr
 }
 
 // ConnectedClients returns a snapshot of all active client connections.

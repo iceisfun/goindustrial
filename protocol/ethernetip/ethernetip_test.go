@@ -1792,3 +1792,105 @@ func TestStressConcurrentClients(t *testing.T) {
 
 	srv.Stop()
 }
+
+// TestServerShutdownDrain verifies that Stop() actively closes all tracked
+// client connections, causing HandleConn goroutines to exit cleanly.
+func TestServerShutdownDrain(t *testing.T) {
+	router := cip.NewMessageRouter()
+
+	const numClients = 3
+	ln := newChanListener(numClients)
+
+	srv := NewServer(router, WithServerListener(ln))
+	if err := srv.Start(context.Background(), ""); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	type clientPair struct {
+		clientConn net.Conn
+	}
+	clients := make([]clientPair, numClients)
+
+	for i := 0; i < numClients; i++ {
+		serverConn, clientConn := net.Pipe()
+		clients[i] = clientPair{clientConn: clientConn}
+		ln.ch <- serverConn
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Wait for all clients to be registered.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(srv.ConnectedClients()) == numClients {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(srv.ConnectedClients()); got != numClients {
+		t.Fatalf("expected %d connected clients, got %d", numClients, got)
+	}
+
+	// Register a session on each client to prove they are fully active.
+	for i := range clients {
+		session := registerSession(t, clients[i].clientConn)
+		if session == 0 {
+			t.Fatalf("client %d: session handle should not be 0", i)
+		}
+	}
+
+	// Start goroutines that wait for reads to fail (proving conn was closed).
+	var wg sync.WaitGroup
+	wg.Add(numClients)
+	readErrs := make([]error, numClients)
+	for i := range clients {
+		i := i
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 1)
+			_, err := clients[i].clientConn.Read(buf)
+			readErrs[i] = err
+		}()
+	}
+
+	// Stop the server — this should close all client connections.
+	if err := srv.Stop(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	// Wait for all HandleConn goroutines to exit (reads should unblock).
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("HandleConn goroutines did not exit within timeout after Stop()")
+	}
+
+	// All reads should have returned errors.
+	for i, err := range readErrs {
+		if err == nil {
+			t.Errorf("client %d: expected read error after Stop(), got nil", i)
+		}
+	}
+
+	// Server should have no tracked clients.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(srv.ConnectedClients()) == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(srv.ConnectedClients()); got != 0 {
+		t.Errorf("expected 0 connected clients after Stop(), got %d", got)
+	}
+
+	// Clean up client conns.
+	for _, c := range clients {
+		c.clientConn.Close()
+	}
+}
