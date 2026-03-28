@@ -132,30 +132,40 @@ func main() {
 	fmt.Printf("Data bytes: % X\n", raw[2:]) // skip type code
 
 	// -----------------------------------------------------------------------
-	// Typed read using the generic helper: ethernetip.Read[T]
+	// Typed read using the generic helpers: ethernetip.Read[T] / ReadSlice[T]
 	//
-	// This function reads a single element, strips the type-code header, and
-	// unmarshals the remaining bytes into the Go type T using binary.Read
-	// (little-endian). It is the easiest way to get a native Go value.
+	// These functions read elements, strip the type-code header, and unmarshal
+	// the remaining bytes into the Go type T using binary.Read (little-endian).
 	//
-	// For array reads, use ethernetip.ReadSlice[T](client, ctx, tag, count).
+	// We use the type code from the raw read to select the matching Go type.
 	// -----------------------------------------------------------------------
-	fmt.Println("\n--- Typed read (DINT / int32) ---")
+	fmt.Println("\n--- Typed read ---")
 
-	if *count == 1 {
-		// Read a single DINT (int32) value.
-		val, err := ethernetip.Read[int32](client, ctx, *tagName)
-		if err != nil {
-			log.Fatalf("Typed Read[int32] failed: %v", err)
-		}
-		fmt.Printf("Value (int32): %d\n", val)
-	} else {
-		// Read an array of DINT (int32) values.
-		vals, err := ethernetip.ReadSlice[int32](client, ctx, *tagName, uint16(*count))
-		if err != nil {
-			log.Fatalf("Typed ReadSlice[int32] failed: %v", err)
-		}
-		fmt.Printf("Values ([]int32): %v\n", vals)
+	switch typeCode {
+	case cip.TypeBOOL:
+		typedRead[bool](client, ctx, *tagName, uint16(*count))
+	case cip.TypeSINT:
+		typedRead[int8](client, ctx, *tagName, uint16(*count))
+	case cip.TypeINT:
+		typedRead[int16](client, ctx, *tagName, uint16(*count))
+	case cip.TypeDINT:
+		typedRead[int32](client, ctx, *tagName, uint16(*count))
+	case cip.TypeLINT:
+		typedRead[int64](client, ctx, *tagName, uint16(*count))
+	case cip.TypeUSINT:
+		typedRead[uint8](client, ctx, *tagName, uint16(*count))
+	case cip.TypeUINT:
+		typedRead[uint16](client, ctx, *tagName, uint16(*count))
+	case cip.TypeUDINT:
+		typedRead[uint32](client, ctx, *tagName, uint16(*count))
+	case cip.TypeULINT:
+		typedRead[uint64](client, ctx, *tagName, uint16(*count))
+	case cip.TypeREAL:
+		typedRead[float32](client, ctx, *tagName, uint16(*count))
+	case cip.TypeLREAL:
+		typedRead[float64](client, ctx, *tagName, uint16(*count))
+	default:
+		fmt.Printf("No typed read for type code 0x%04X; use raw bytes above.\n", uint16(typeCode))
 	}
 
 	// -----------------------------------------------------------------------
@@ -182,4 +192,20 @@ func main() {
 	// -----------------------------------------------------------------------
 
 	fmt.Println("\nDone.")
+}
+
+func typedRead[T any](client *ethernetip.Client, ctx context.Context, tag string, count uint16) {
+	if count == 1 {
+		val, err := ethernetip.Read[T](client, ctx, tag)
+		if err != nil {
+			log.Fatalf("Typed Read failed: %v", err)
+		}
+		fmt.Printf("Value (%T): %v\n", val, val)
+	} else {
+		vals, err := ethernetip.ReadSlice[T](client, ctx, tag, count)
+		if err != nil {
+			log.Fatalf("Typed ReadSlice failed: %v", err)
+		}
+		fmt.Printf("Values (%T): %v\n", vals, vals)
+	}
 }
