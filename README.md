@@ -1,5 +1,7 @@
 # goindustrial
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/iceisfun/goindustrial/.svg)](https://pkg.go.dev/github.com/iceisfun/goindustrial/)
+
 A unified Go library for industrial communication protocols. Consolidates **Modbus TCP** and **EtherNet/IP (CIP)** under common abstractions for transport, logging, monitoring, and PLC access.
 
 Zero external dependencies for core protocols. Pure Go. Go 1.25+. The optional `lua/` package requires [GoLua](https://github.com/iceisfun/golua).
