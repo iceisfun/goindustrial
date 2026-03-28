@@ -1,6 +1,7 @@
 package modbus
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -540,6 +541,109 @@ func TestResponseEncodingRoundTrip(t *testing.T) {
 	}
 	if len(decoded.GetPDU().Data) != 5 {
 		t.Fatalf("data length: got %d, want 5", len(decoded.GetPDU().Data))
+	}
+}
+
+func TestMBAPEncode(t *testing.T) {
+	m := MBAP{
+		TransactionID: 0x0C05,
+		ProtocolID:    TCPProtocolIdentifier,
+		UnitID:        0x11,
+	}
+	var buf bytes.Buffer
+	// pduLength = FC (1) + data (4) = 5
+	if err := m.Encode(&buf, 5); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	got := buf.Bytes()
+	// Expected: TID(2) + Proto(2) + Length(2) + Unit(1) = 7 bytes
+	// Length = 1 (unit ID counted in MBAP) + 5 (PDU) = 6
+	want := []byte{
+		0x0C, 0x05, // Transaction ID = 3077
+		0x00, 0x00, // Protocol ID = 0
+		0x00, 0x06, // Length = 6
+		0x11,       // Unit ID = 17
+	}
+	if len(got) != TCPHeaderLength {
+		t.Fatalf("length: got %d, want %d", len(got), TCPHeaderLength)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("byte %d: got 0x%02X, want 0x%02X", i, got[i], w)
+		}
+	}
+}
+
+func TestMBAPDecode(t *testing.T) {
+	raw := []byte{
+		0x0C, 0x05, // Transaction ID = 3077
+		0x00, 0x00, // Protocol ID = 0
+		0x00, 0x07, // Length = 7
+		0x11,       // Unit ID = 17
+	}
+	reader := bytes.NewReader(raw)
+
+	var m MBAP
+	length, err := m.Decode(reader)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if m.TransactionID != 3077 {
+		t.Fatalf("TID: got %d, want 3077", m.TransactionID)
+	}
+	if m.ProtocolID != TCPProtocolIdentifier {
+		t.Fatalf("protocol ID: got %d, want 0", m.ProtocolID)
+	}
+	if m.UnitID != 0x11 {
+		t.Fatalf("unit ID: got %d, want 0x11", m.UnitID)
+	}
+	if length != 7 {
+		t.Fatalf("length: got %d, want 7", length)
+	}
+}
+
+func TestMBAPRoundTrip(t *testing.T) {
+	original := MBAP{
+		TransactionID: 0xABCD,
+		ProtocolID:    TCPProtocolIdentifier,
+		UnitID:        42,
+	}
+
+	var buf bytes.Buffer
+	if err := original.Encode(&buf, 10); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	reader := bytes.NewReader(buf.Bytes())
+	var decoded MBAP
+	length, err := decoded.Decode(reader)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if decoded.TransactionID != original.TransactionID {
+		t.Fatalf("TID: got %d, want %d", decoded.TransactionID, original.TransactionID)
+	}
+	if decoded.ProtocolID != original.ProtocolID {
+		t.Fatalf("protocol ID: got %d, want %d", decoded.ProtocolID, original.ProtocolID)
+	}
+	if decoded.UnitID != original.UnitID {
+		t.Fatalf("unit ID: got %d, want %d", decoded.UnitID, original.UnitID)
+	}
+	// Length = 1 (unit ID) + 10 (pduLength) = 11
+	if length != 11 {
+		t.Fatalf("length: got %d, want 11", length)
+	}
+}
+
+func TestMBAPDecodeShortData(t *testing.T) {
+	// Only 4 bytes — not enough for the full 7-byte header.
+	reader := bytes.NewReader([]byte{0x00, 0x01, 0x00, 0x00})
+	var m MBAP
+	_, err := m.Decode(reader)
+	if err == nil {
+		t.Fatal("expected error for short data")
 	}
 }
 

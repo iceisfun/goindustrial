@@ -7,15 +7,12 @@ import (
 	"time"
 )
 
-// Request represents a Modbus TCP request. It carries the MBAP header fields
-// (transaction ID, protocol ID, unit ID) and a [PDU] containing the function
-// code and request-specific data.
+// Request represents a Modbus TCP request. It embeds an [MBAP] header and
+// carries a [PDU] containing the function code and request-specific data.
 type Request struct {
-	TransactionID TransactionID
-	ProtocolID    ProtocolID
-	UnitID        UnitID
-	PDU           *PDU
-	Create        time.Time
+	MBAP
+	PDU    *PDU
+	Create time.Time
 }
 
 // NewRequest creates a new Request with the given unit ID, function code, and
@@ -23,8 +20,10 @@ type Request struct {
 // [TransactionPool].
 func NewRequest(unitID UnitID, functionCode FunctionCode, data []byte) *Request {
 	return &Request{
-		ProtocolID: TCPProtocolIdentifier,
-		UnitID:     unitID,
+		MBAP: MBAP{
+			ProtocolID: TCPProtocolIdentifier,
+			UnitID:     unitID,
+		},
 		PDU: &PDU{
 			FunctionCode: functionCode,
 			Data:         data,
@@ -56,22 +55,10 @@ func (r *Request) GetPDU() *PDU {
 // Encode serialises the Request into a Modbus TCP frame (MBAP header + PDU)
 // with big-endian byte order, ready to be written to a TCP connection.
 func (r *Request) Encode() ([]byte, error) {
-	// Length field = Unit ID (1 byte) + Function Code (1 byte) + Data (N bytes)
-	length := uint16(1 + 1 + len(r.PDU.Data))
-
 	buffer := bytes.Buffer{}
 
-	// Write MBAP header - all multi-byte values use big-endian byte order
-	if err := binary.Write(&buffer, binary.BigEndian, r.TransactionID); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buffer, binary.BigEndian, r.ProtocolID); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buffer, binary.BigEndian, length); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buffer, binary.BigEndian, r.UnitID); err != nil {
+	// PDU length = Function Code (1 byte) + Data (N bytes)
+	if err := r.MBAP.Encode(&buffer, 1+len(r.PDU.Data)); err != nil {
 		return nil, err
 	}
 
@@ -95,20 +82,8 @@ func (r *Request) Decode(data []byte) error {
 
 	buffer := bytes.NewReader(data)
 
-	// Read MBAP header
-	if err := binary.Read(buffer, binary.BigEndian, &r.TransactionID); err != nil {
-		return err
-	}
-	if err := binary.Read(buffer, binary.BigEndian, &r.ProtocolID); err != nil {
-		return err
-	}
-
-	var length uint16
-	if err := binary.Read(buffer, binary.BigEndian, &length); err != nil {
-		return err
-	}
-
-	if err := binary.Read(buffer, binary.BigEndian, &r.UnitID); err != nil {
+	length, err := r.MBAP.Decode(buffer)
+	if err != nil {
 		return err
 	}
 

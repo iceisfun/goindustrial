@@ -6,23 +6,23 @@ import (
 	"io"
 )
 
-// Response represents a Modbus TCP response. It carries the MBAP header fields
-// (transaction ID, protocol ID, unit ID) and a [PDU] containing the function
-// code and response-specific data. If the server replied with an exception, the
-// function code will have its high bit set.
+// Response represents a Modbus TCP response. It embeds an [MBAP] header and
+// carries a [PDU] containing the function code and response-specific data. If
+// the server replied with an exception, the function code will have its high
+// bit set.
 type Response struct {
-	TransactionID TransactionID
-	ProtocolID    ProtocolID
-	UnitID        UnitID
-	PDU           *PDU
+	MBAP
+	PDU *PDU
 }
 
 // NewResponse creates a new Response with the given MBAP fields and PDU data.
 func NewResponse(transactionID TransactionID, unitID UnitID, functionCode FunctionCode, data []byte) *Response {
 	return &Response{
-		TransactionID: transactionID,
-		ProtocolID:    TCPProtocolIdentifier,
-		UnitID:        unitID,
+		MBAP: MBAP{
+			TransactionID: transactionID,
+			ProtocolID:    TCPProtocolIdentifier,
+			UnitID:        unitID,
+		},
 		PDU: &PDU{
 			FunctionCode: functionCode,
 			Data:         data,
@@ -48,22 +48,10 @@ func (r *Response) GetPDU() *PDU {
 // Encode serialises the Response into a Modbus TCP frame (MBAP header + PDU)
 // with big-endian byte order, ready to be written to a TCP connection.
 func (r *Response) Encode() ([]byte, error) {
-	// Length field = Unit ID (1 byte) + Function Code (1 byte) + Data (N bytes)
-	length := uint16(1 + 1 + len(r.PDU.Data))
-
 	buffer := bytes.Buffer{}
 
-	// Write MBAP header
-	if err := binary.Write(&buffer, binary.BigEndian, r.TransactionID); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buffer, binary.BigEndian, r.ProtocolID); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buffer, binary.BigEndian, length); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(&buffer, binary.BigEndian, r.UnitID); err != nil {
+	// PDU length = Function Code (1 byte) + Data (N bytes)
+	if err := r.MBAP.Encode(&buffer, 1+len(r.PDU.Data)); err != nil {
 		return nil, err
 	}
 
@@ -87,19 +75,8 @@ func (r *Response) Decode(data []byte) error {
 
 	buffer := bytes.NewReader(data)
 
-	if err := binary.Read(buffer, binary.BigEndian, &r.TransactionID); err != nil {
-		return err
-	}
-	if err := binary.Read(buffer, binary.BigEndian, &r.ProtocolID); err != nil {
-		return err
-	}
-
-	var length uint16
-	if err := binary.Read(buffer, binary.BigEndian, &length); err != nil {
-		return err
-	}
-
-	if err := binary.Read(buffer, binary.BigEndian, &r.UnitID); err != nil {
+	length, err := r.MBAP.Decode(buffer)
+	if err != nil {
 		return err
 	}
 
