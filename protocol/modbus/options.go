@@ -1,9 +1,11 @@
 package modbus
 
 import (
+	"io"
 	"net"
 	"time"
 
+	"github.com/iceisfun/goindustrial/hexdump"
 	"github.com/iceisfun/goindustrial/logging"
 )
 
@@ -42,6 +44,16 @@ func WithConn(conn net.Conn) TCPConnOption {
 func WithConnLogger(logger logging.Logger) TCPConnOption {
 	return func(c *TCPConn) {
 		c.logger = logger
+	}
+}
+
+// WithHexDump enables hex dump tracing of all Modbus TCP wire traffic. Data
+// read from and written to the TCP connection is formatted in traditional hex
+// dump style and written to out. Pass [os.Stdout] for console debugging or an
+// [os.File] for offline analysis.
+func WithHexDump(out io.Writer) TCPConnOption {
+	return func(c *TCPConn) {
+		c.hexDumper = hexdump.NewDumper(out)
 	}
 }
 

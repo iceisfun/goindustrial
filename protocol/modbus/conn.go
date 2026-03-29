@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/iceisfun/goindustrial/hexdump"
 	"github.com/iceisfun/goindustrial/logging"
 )
 
@@ -21,6 +22,7 @@ type TCPConn struct {
 	host            string
 	port            int
 	timeout         time.Duration
+	hexDumper       *hexdump.Dumper   // optional: set via WithHexDump
 	injectedConn    net.Conn          // optional: injected via WithConn for testing
 	conn            net.Conn          // active TCP connection
 	reader          io.Reader
@@ -107,8 +109,12 @@ func (c *TCPConn) Connect(ctx context.Context) error {
 		c.conn = conn
 	}
 
-	c.reader = c.conn
-	c.writer = c.conn
+	c.reader = io.Reader(c.conn)
+	c.writer = io.Writer(c.conn)
+	if c.hexDumper != nil {
+		c.reader = c.hexDumper.WrapReader(c.reader)
+		c.writer = c.hexDumper.WrapWriter(c.writer)
+	}
 
 	c.closeOnce = sync.Once{}
 	c.connected = true
