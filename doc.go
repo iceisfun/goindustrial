@@ -23,6 +23,8 @@
 //     abstraction and value types.
 //   - [github.com/iceisfun/goindustrial/transport] — shared TCP transport with
 //     automatic reconnection and configurable backoff.
+//   - [github.com/iceisfun/goindustrial/hexdump] — wire-level hex dump tracing
+//     for protocol connections.
 //   - [github.com/iceisfun/goindustrial/monitor] — periodic polling monitor
 //     that watches data points and invokes callbacks on change or error.
 //   - [github.com/iceisfun/goindustrial/logging] — structured logging interface

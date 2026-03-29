@@ -12,6 +12,7 @@ Zero external dependencies for core protocols. Pure Go. Go 1.25+. The optional `
 goindustrial/
     logging/                     Unified structured logging
     transport/                   Generic transport lifecycle (reconnect, retry)
+    hexdump/                     Wire-level hex dump tracing
     plc/                         Protocol-agnostic PLC interface
     monitor/                     Polling engine with change detection
 
@@ -130,6 +131,38 @@ mon.Subscribe(modbus.HoldingRegister{Addr: 101, Qty: 1}, ...)
 mon.Subscribe(modbus.HoldingRegister{Addr: 102, Qty: 1}, ...)
 ```
 
+### Hex Dump Tracing
+
+Both protocols support wire-level hex dump tracing via `WithHexDump`. Pass any `io.Writer` to see every byte on the wire in traditional `hexdump -C` format:
+
+```go
+// Modbus: hex dump to stdout
+client, err := modbus.Connect(ctx, "192.168.1.10",
+    modbus.WithHexDump(os.Stdout),
+)
+
+// EtherNet/IP: hex dump to a file
+f, _ := os.Create("trace.hex")
+defer f.Close()
+client, err := ethernetip.Connect(ctx, "192.168.1.20",
+    ethernetip.WithHexDump(f),
+)
+
+// Both stdout and file simultaneously
+client, err := modbus.Connect(ctx, "192.168.1.10",
+    modbus.WithHexDump(io.MultiWriter(os.Stdout, f)),
+)
+```
+
+Output:
+
+```
+>>> WRITE 12 bytes
+00000000  00 00 00 00 00 06 01 03  00 00 00 03              |............    |
+<<< READ 15 bytes
+00000000  00 00 00 00 00 09 01 03  06 00 01 00 02 00 03     |...............  |
+```
+
 ### Lua Scripting (Optional)
 
 The `lua/` package provides [GoLua](https://github.com/iceisfun/golua) bindings so Lua scripts can drive Modbus and EtherNet/IP operations. This is useful for user-configurable data collection, alerting, and transformation logic without recompiling Go code.
@@ -166,6 +199,7 @@ plc:close()
 
 - **`logging.Logger`** -- Context-aware, leveled, structured fields. Pluggable: supply your own or use the default.
 - **`transport.Transport[C]`** -- Generic connection lifecycle with `DirectTransport` and `ReconnectingTransport` (RWMutex double-check locking, lifecycle hooks).
+- **`hexdump.Dumper`** -- Wire-level hex dump tracing for any `io.Reader`/`io.Writer`. Both protocols accept `WithHexDump(io.Writer)` to capture all TCP traffic.
 - **`plc.PLC`** -- Protocol-agnostic interface (`Reader`, `Writer`, `Connect`, `Disconnect`). Both protocol clients implement this.
 - **`monitor.Monitor`** -- Subscription-per-goroutine polling engine with frequency control, read variance (jitter), change detection, and handler callbacks.
 
@@ -220,6 +254,7 @@ Every example is a standalone `main.go` with its own README explaining the relev
 | [`modbus/server`](examples/modbus/server/) | TCP server with data store, client tracking, graceful shutdown |
 | [`modbus/reconnecting`](examples/modbus/reconnecting/) | Manual transport build, lifecycle hooks, error classification |
 | [`modbus/all_data_types`](examples/modbus/all_data_types/) | All four data areas and every function code in one demo |
+| [`modbus/hexdump`](examples/modbus/hexdump/) | Wire-level hex dump tracing to stdout or file |
 
 ### EtherNet/IP (CIP)
 
@@ -236,6 +271,7 @@ Every example is a standalone `main.go` with its own README explaining the relev
 | [`ethernetip/probe`](examples/ethernetip/probe/) | Full device probe: identity, network, assemblies, CIP objects, tags |
 | [`ethernetip/adapter`](examples/ethernetip/adapter/) | Implicit I/O adapter: accepts Forward_Open, cyclic UDP exchange |
 | [`ethernetip/io_scanner`](examples/ethernetip/io_scanner/) | Implicit I/O scanner: sends Forward_Open, cyclic UDP exchange |
+| [`ethernetip/hexdump`](examples/ethernetip/hexdump/) | Wire-level hex dump tracing to stdout or file |
 
 ### Cross-Protocol
 

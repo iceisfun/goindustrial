@@ -24,6 +24,7 @@ SKILLS:
 - EtherNet/IP quick path: ethernetip.Connect(ctx, addr, opts...) -> client.ReadTag / WriteTag / ReadTagInto / etc.
 - Both protocols support reconnecting transports: transport.NewReconnectingTransport[C](connector, closer, opts...).
 - Functional options everywhere: modbus.WithRetries(3), modbus.WithUnitID(1), ethernetip.WithRetryDelay(2*time.Second), etc.
+- Wire-level hex dump tracing: modbus.WithHexDump(os.Stdout) or ethernetip.WithHexDump(w) dumps all TCP traffic in hexdump -C format. Uses hexdump.Dumper which wraps io.Reader/io.Writer. Use io.MultiWriter to write to both stdout and a file.
 - Monitor polls any plc.Reader: monitor.NewMonitor(reader) -> m.Subscribe(dataPoint, monitor.WithFrequency(100*ms)).
 - Adaptive read clustering: monitor.NewClusteringReader(modbusClient, monitor.WithGapThreshold(32)) wraps a reader to coalesce nearby Modbus addresses into block reads. Reduces N subscriptions from N requests to ~1 per cluster. Supports cache TTL for cross-goroutine sharing, singleflight dedup, and WithClusteringEnabled(false) to force OFF.
 - Clusterable interface: Modbus data point types (HoldingRegister, InputRegister, Coil, DiscreteInput) implement ClusterKey/ClusterAddr/ClusterQty/ClusterMerge/ClusterExtract for protocol-agnostic clustering.
@@ -604,6 +605,45 @@ logger.Info(ctx, "connected to %s", addr)
 logger.WithFields(map[string]any{"unit": 1}).Debug(ctx, "reading registers")
 ```
 
+## Hex Dump Tracing
+
+Both protocols support wire-level hex dump tracing via `WithHexDump(io.Writer)`:
+
+```go
+// Modbus: hex dump to stdout
+client, err := modbus.Connect(ctx, "192.168.1.10",
+    modbus.WithHexDump(os.Stdout),
+)
+
+// EtherNet/IP: hex dump to a file
+f, _ := os.Create("trace.hex")
+client, err := ethernetip.Connect(ctx, "192.168.1.20",
+    ethernetip.WithHexDump(f),
+)
+
+// Both stdout and file simultaneously
+client, err := modbus.Connect(ctx, "192.168.1.10",
+    modbus.WithHexDump(io.MultiWriter(os.Stdout, f)),
+)
+```
+
+Output format (hexdump -C style, short lines padded for column alignment):
+
+```
+>>> WRITE 12 bytes
+00000000  00 00 00 00 00 06 01 03  00 00 00 03              |............    |
+<<< READ 15 bytes
+00000000  00 00 00 00 00 09 01 03  06 00 01 00 02 00 03     |...............  |
+```
+
+The `hexdump.Dumper` type can also be used directly to wrap any `io.Reader` or `io.Writer`:
+
+```go
+d := hexdump.NewDumper(os.Stdout)
+wrappedReader := d.WrapReader(someReader)
+wrappedWriter := d.WrapWriter(someWriter)
+```
+
 ## Testing with net.Pipe
 
 Both protocols support injecting a `net.Conn` for in-process testing:
@@ -722,9 +762,9 @@ end
 
 Runnable examples under `examples/` covering every operation, each with its own README:
 
-**Modbus:** read_registers, write_registers, read_coils, write_coils, read_write_registers, device_identification, server, reconnecting, all_data_types
+**Modbus:** read_registers, write_registers, read_coils, write_coils, read_write_registers, device_identification, server, reconnecting, all_data_types, hexdump
 
-**EtherNet/IP:** read_tag, write_tag, read_tag_typed, timer_counter, list_tags, list_identity, server, reconnecting, probe, adapter, io_scanner
+**EtherNet/IP:** read_tag, write_tag, read_tag_typed, timer_counter, list_tags, list_identity, server, reconnecting, probe, adapter, io_scanner, hexdump
 
 **Cross-protocol:** monitor_polling, monitor_subscriber, plc_interface
 
