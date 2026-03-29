@@ -1,9 +1,11 @@
 package ethernetip
 
 import (
+	"io"
 	"net"
 	"time"
 
+	"github.com/iceisfun/goindustrial/hexdump"
 	"github.com/iceisfun/goindustrial/logging"
 )
 
@@ -13,6 +15,7 @@ import (
 type connConfig struct {
 	conn        net.Conn
 	dialTimeout time.Duration
+	hexDumper   *hexdump.Dumper
 }
 
 // ConnOption configures a [TCPConn] created by [NewTCPConn].
@@ -31,6 +34,16 @@ func WithConn(conn net.Conn) ConnOption {
 func WithDialTimeout(d time.Duration) ConnOption {
 	return func(cfg *connConfig) {
 		cfg.dialTimeout = d
+	}
+}
+
+// WithHexDump enables hex dump tracing of all EtherNet/IP wire traffic. Data
+// read from and written to the TCP connection is formatted in traditional hex
+// dump style and written to out. Pass [os.Stdout] for console debugging or an
+// [os.File] for offline analysis.
+func WithHexDump(out io.Writer) ConnOption {
+	return func(cfg *connConfig) {
+		cfg.hexDumper = hexdump.NewDumper(out)
 	}
 }
 

@@ -54,21 +54,38 @@ func NewClient(t transport.Transport[*Session], opts ...ClientOption) *Client {
 // registers an EtherNet/IP session, and returns a ready-to-use Client. The
 // connection is direct (non-reconnecting); if it drops, operations will fail
 // until a new Client is created.
-func Connect(ctx context.Context, address string, opts ...ClientOption) (*Client, error) {
-	// Extract logger from options (peek).
+//
+// Options may be [ClientOption], [ConnOption], or [transport.Option] values
+// and are routed to the appropriate layer automatically.
+func Connect(ctx context.Context, address string, opts ...any) (*Client, error) {
+	var connOpts []ConnOption
+	var clientOpts []ClientOption
+	var transportOpts []transport.Option
+
+	for _, o := range opts {
+		switch v := o.(type) {
+		case ConnOption:
+			connOpts = append(connOpts, v)
+		case ClientOption:
+			clientOpts = append(clientOpts, v)
+		case transport.Option:
+			transportOpts = append(transportOpts, v)
+		}
+	}
+
 	c := &Client{
 		logger:     logging.NewNopLogger(),
 		retries:    0,
 		retryDelay: 1 * time.Second,
 	}
-	for _, opt := range opts {
+	for _, opt := range clientOpts {
 		opt(c)
 	}
 
-	connector := NewSessionConnector(address, c.logger)
+	connector := NewSessionConnector(address, c.logger, connOpts...)
 	closer := SessionCloser{}
 
-	dt, err := transport.NewDirectTransport[*Session](ctx, connector, closer)
+	dt, err := transport.NewDirectTransport[*Session](ctx, connector, closer, transportOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -80,20 +97,38 @@ func Connect(ctx context.Context, address string, opts ...ClientOption) (*Client
 // NewReconnectingClient creates a Client that connects lazily on the first
 // operation and automatically reconnects after a transport failure. The
 // constructor itself never dials, so it always returns successfully.
-func NewReconnectingClient(address string, opts ...ClientOption) *Client {
+//
+// Options may be [ClientOption], [ConnOption], or [transport.Option] values
+// and are routed to the appropriate layer automatically.
+func NewReconnectingClient(address string, opts ...any) *Client {
+	var connOpts []ConnOption
+	var clientOpts []ClientOption
+	var transportOpts []transport.Option
+
+	for _, o := range opts {
+		switch v := o.(type) {
+		case ConnOption:
+			connOpts = append(connOpts, v)
+		case ClientOption:
+			clientOpts = append(clientOpts, v)
+		case transport.Option:
+			transportOpts = append(transportOpts, v)
+		}
+	}
+
 	c := &Client{
 		logger:     logging.NewNopLogger(),
 		retries:    0,
 		retryDelay: 1 * time.Second,
 	}
-	for _, opt := range opts {
+	for _, opt := range clientOpts {
 		opt(c)
 	}
 
-	connector := NewSessionConnector(address, c.logger)
+	connector := NewSessionConnector(address, c.logger, connOpts...)
 	closer := SessionCloser{}
 
-	c.transport = transport.NewReconnectingTransport[*Session](connector, closer)
+	c.transport = transport.NewReconnectingTransport[*Session](connector, closer, transportOpts...)
 	return c
 }
 

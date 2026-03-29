@@ -15,8 +15,10 @@ import (
 // TCP connection. It serializes writes with an internal mutex so it is safe
 // for concurrent use.
 type TCPConn struct {
-	conn net.Conn
-	wmu  sync.Mutex // protects concurrent writes
+	conn   net.Conn
+	reader io.Reader
+	writer io.Writer
+	wmu    sync.Mutex // protects concurrent writes
 }
 
 // NewTCPConn dials a TCP connection to the given address for EtherNet/IP
@@ -32,19 +34,30 @@ func NewTCPConn(address string, opts ...ConnOption) (*TCPConn, error) {
 	}
 
 	// If a connection was injected, use it directly.
+	var rawConn net.Conn
 	if cfg.conn != nil {
-		return &TCPConn{conn: cfg.conn}, nil
+		rawConn = cfg.conn
+	} else {
+		if !strings.Contains(address, ":") {
+			address = address + ":44818"
+		}
+		c, err := net.DialTimeout("tcp", address, cfg.dialTimeout)
+		if err != nil {
+			return nil, err
+		}
+		rawConn = c
 	}
 
-	if !strings.Contains(address, ":") {
-		address = address + ":44818"
+	tc := &TCPConn{
+		conn:   rawConn,
+		reader: rawConn,
+		writer: rawConn,
 	}
-
-	conn, err := net.DialTimeout("tcp", address, cfg.dialTimeout)
-	if err != nil {
-		return nil, err
+	if cfg.hexDumper != nil {
+		tc.reader = cfg.hexDumper.WrapReader(rawConn)
+		tc.writer = cfg.hexDumper.WrapWriter(rawConn)
 	}
-	return &TCPConn{conn: conn}, nil
+	return tc, nil
 }
 
 // Send writes a complete EIP encapsulation packet (24-byte header + data) to
@@ -63,13 +76,13 @@ func (t *TCPConn) Send(cmd eip.Command, data []byte, sessionHandle eip.SessionHa
 	defer t.wmu.Unlock()
 
 	// Write Header
-	if err := header.Encode(t.conn); err != nil {
+	if err := header.Encode(t.writer); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
 	}
 
 	// Write Data
 	if len(data) > 0 {
-		if _, err := t.conn.Write(data); err != nil {
+		if _, err := t.writer.Write(data); err != nil {
 			return fmt.Errorf("failed to write data: %w", err)
 		}
 	}
@@ -81,14 +94,14 @@ func (t *TCPConn) Send(cmd eip.Command, data []byte, sessionHandle eip.SessionHa
 // returns the parsed header and the command-specific data payload.
 func (t *TCPConn) Receive() (*eip.EncapsulationHeader, []byte, error) {
 	header := &eip.EncapsulationHeader{}
-	if err := header.Decode(t.conn); err != nil {
+	if err := header.Decode(t.reader); err != nil {
 		return nil, nil, fmt.Errorf("failed to read header: %w", err)
 	}
 
 	var data []byte
 	if header.Length > 0 {
 		data = make([]byte, header.Length)
-		if _, err := io.ReadFull(t.conn, data); err != nil {
+		if _, err := io.ReadFull(t.reader, data); err != nil {
 			return nil, nil, fmt.Errorf("failed to read data: %w", err)
 		}
 	}
