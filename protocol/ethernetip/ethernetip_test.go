@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/iceisfun/goindustrial/plc"
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/cip"
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/eip"
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/objects/assembly"
@@ -1984,4 +1986,181 @@ func TestServerMaxClients(t *testing.T) {
 	if got := len(srv.ConnectedClients()); got != maxClients {
 		t.Fatalf("expected %d connected clients after reconnect, got %d", maxClients, got)
 	}
+}
+
+// ===========================================================================
+// Test: Client.Read strips CIP type prefix from Value.Raw
+// ===========================================================================
+
+// TestClientReadStripsTypePrefix verifies that Client.Read returns Value.Raw
+// containing only the data payload (no CIP type code prefix), so that the
+// helper methods (Bool, Int, Float32, etc.) interpret the bytes correctly.
+// Before the fix, Raw included the 2-byte type prefix which caused Bool() to
+// always return true and Int()/Float32() to return wrong values.
+func TestClientReadStripsTypePrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		cipType  cip.DataType
+		payload  []byte // data after the 2-byte type prefix
+		wantType plc.DataType
+	}{
+		{
+			name:     "BOOL false",
+			cipType:  cip.TypeBOOL,
+			payload:  []byte{0x00},
+			wantType: plc.TypeBool,
+		},
+		{
+			name:     "BOOL true",
+			cipType:  cip.TypeBOOL,
+			payload:  []byte{0x01},
+			wantType: plc.TypeBool,
+		},
+		{
+			name:     "DINT 42",
+			cipType:  cip.TypeDINT,
+			payload:  []byte{0x2A, 0x00, 0x00, 0x00},
+			wantType: plc.TypeInt32,
+		},
+		{
+			name:     "REAL 3.14",
+			cipType:  cip.TypeREAL,
+			payload:  func() []byte { b := make([]byte, 4); binary.LittleEndian.PutUint32(b, math.Float32bits(3.14)); return b }(),
+			wantType: plc.TypeFloat32,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build the CIP response: 2-byte type prefix + payload.
+			response := make([]byte, 2+len(tt.payload))
+			binary.LittleEndian.PutUint16(response[0:2], uint16(tt.cipType))
+			copy(response[2:], tt.payload)
+
+			router := cip.NewMessageRouter()
+			router.RegisterSymbolicHandler(&mockObject{
+				handleFunc: func(service cip.USINT, path cip.Path, data []byte) ([]byte, error) {
+					return response, nil
+				},
+			})
+
+			_, clientConn := setupPipePair(t, router)
+
+			client, err := Connect(context.Background(), "", WithConn(clientConn))
+			if err != nil {
+				t.Fatalf("Connect: %v", err)
+			}
+
+			values, err := client.Read(context.Background(), Tag{Name: "TestTag"})
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			if len(values) != 1 {
+				t.Fatalf("got %d values, want 1", len(values))
+			}
+
+			val := values[0]
+
+			// Verify type hint.
+			if val.Type != tt.wantType {
+				t.Errorf("Type = %v, want %v", val.Type, tt.wantType)
+			}
+
+			// Verify Raw does NOT contain the type prefix.
+			if !bytes.Equal(val.Raw, tt.payload) {
+				t.Errorf("Raw = %X, want %X (type prefix should be stripped)", val.Raw, tt.payload)
+			}
+		})
+	}
+
+	// Focused regression checks: the helpers must return correct values now
+	// that Raw is stripped. Before the fix these would fail.
+
+	t.Run("Bool false helper", func(t *testing.T) {
+		// CIP response: TypeBOOL (0xC1 0x00) + 0x00
+		response := []byte{0xC1, 0x00, 0x00}
+
+		router := cip.NewMessageRouter()
+		router.RegisterSymbolicHandler(&mockObject{
+			handleFunc: func(service cip.USINT, path cip.Path, data []byte) ([]byte, error) {
+				return response, nil
+			},
+		})
+
+		_, clientConn := setupPipePair(t, router)
+		client, err := Connect(context.Background(), "", WithConn(clientConn))
+		if err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+
+		values, err := client.Read(context.Background(), Tag{Name: "BoolTag"})
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if values[0].Bool() != false {
+			t.Error("Bool() = true for BOOL false; type prefix was not stripped")
+		}
+	})
+
+	t.Run("DINT Int helper", func(t *testing.T) {
+		// CIP response: TypeDINT (0xC4 0x00) + int32(42) LE
+		response := []byte{0xC4, 0x00, 0x2A, 0x00, 0x00, 0x00}
+
+		router := cip.NewMessageRouter()
+		router.RegisterSymbolicHandler(&mockObject{
+			handleFunc: func(service cip.USINT, path cip.Path, data []byte) ([]byte, error) {
+				return response, nil
+			},
+		})
+
+		_, clientConn := setupPipePair(t, router)
+		client, err := Connect(context.Background(), "", WithConn(clientConn))
+		if err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+
+		values, err := client.Read(context.Background(), Tag{Name: "IntTag"})
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		got, err := values[0].Int()
+		if err != nil {
+			t.Fatalf("Int(): %v", err)
+		}
+		if got != 42 {
+			t.Errorf("Int() = %d, want 42", got)
+		}
+	})
+
+	t.Run("REAL Float32 helper", func(t *testing.T) {
+		// CIP response: TypeREAL (0xCA 0x00) + float32(3.14) LE
+		payload := make([]byte, 4)
+		binary.LittleEndian.PutUint32(payload, math.Float32bits(3.14))
+		response := append([]byte{0xCA, 0x00}, payload...)
+
+		router := cip.NewMessageRouter()
+		router.RegisterSymbolicHandler(&mockObject{
+			handleFunc: func(service cip.USINT, path cip.Path, data []byte) ([]byte, error) {
+				return response, nil
+			},
+		})
+
+		_, clientConn := setupPipePair(t, router)
+		client, err := Connect(context.Background(), "", WithConn(clientConn))
+		if err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+
+		values, err := client.Read(context.Background(), Tag{Name: "RealTag"})
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		got, err := values[0].Float32()
+		if err != nil {
+			t.Fatalf("Float32(): %v", err)
+		}
+		if got != 3.14 {
+			t.Errorf("Float32() = %v, want 3.14", got)
+		}
+	})
 }
