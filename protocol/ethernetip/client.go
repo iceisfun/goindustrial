@@ -159,8 +159,8 @@ func (c *Client) IsConnected() bool {
 }
 
 // Read reads one or more data points from the PLC. Each DataPoint must be a
-// [Tag]. The returned Values contain the raw CIP response bytes (including the
-// 2-byte type code prefix) and a protocol-agnostic type hint.
+// [Tag]. The returned Values contain the raw data bytes (with the CIP type
+// code prefix stripped) and a protocol-agnostic type hint.
 func (c *Client) Read(ctx context.Context, points ...plc.DataPoint) ([]plc.Value, error) {
 	values := make([]plc.Value, 0, len(points))
 	for _, dp := range points {
@@ -179,16 +179,24 @@ func (c *Client) Read(ctx context.Context, points ...plc.DataPoint) ([]plc.Value
 
 		val := plc.Value{
 			DataPoint: dp,
-			Raw:       raw,
 			ByteOrder: plc.ByteOrderLittleEndian,
 		}
 
-		// The first 2 bytes of a CIP ReadTag response are the type code.
-		// Extract it to set the protocol-agnostic type hint.
+		// The first 2 bytes of a CIP ReadTag response are the type code
+		// (4 bytes for struct types). Extract the type hint and strip the
+		// prefix so that Raw contains only the data payload.
 		if len(raw) >= 2 {
 			cipType := cip.DataType(binary.LittleEndian.Uint16(raw[0:2]))
 			val.Type = cipTypeToPlcType(cipType)
+			hdrLen := 2
+			if cipType >= cip.TypeSTRUCT {
+				hdrLen = 4
+			}
+			if len(raw) >= hdrLen {
+				raw = raw[hdrLen:]
+			}
 		}
+		val.Raw = raw
 
 		values = append(values, val)
 	}
