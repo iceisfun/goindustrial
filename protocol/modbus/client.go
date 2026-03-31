@@ -52,11 +52,8 @@ func Connect(ctx context.Context, host string, opts ...any) (*Client, error) {
 	connector := NewTCPConnector(host, connOpts...)
 	closer := NewTCPCloser()
 
-	tp := transport.NewReconnectingTransport[*TCPConn](connector, closer, transportOpts...)
-
-	// Force an initial connection to verify reachability.
-	if _, err := tp.Conn(ctx); err != nil {
-		_ = tp.Close()
+	tp, err := transport.DialReconnectingTransport(ctx, connector, closer, transportOpts...)
+	if err != nil {
 		return nil, fmt.Errorf("modbus connect: %w", err)
 	}
 

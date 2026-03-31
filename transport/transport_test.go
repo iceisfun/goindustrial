@@ -111,6 +111,73 @@ func TestDirectTransportOnConnectCallback(t *testing.T) {
 	}
 }
 
+func TestDialReconnectingTransport(t *testing.T) {
+	var counter atomic.Int32
+	ctx := context.Background()
+
+	rt, err := DialReconnectingTransport(ctx, newMockConnector(&counter, 0), newMockCloser())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer rt.Close()
+
+	// Connection should already exist.
+	if n := counter.Load(); n != 1 {
+		t.Errorf("expected 1 connection at construction, got %d", n)
+	}
+
+	// Conn returns the already-established connection.
+	conn, err := rt.Conn(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if conn.id != 1 {
+		t.Errorf("expected conn id 1, got %d", conn.id)
+	}
+
+	// Still reconnects after Reset.
+	rt.Reset(conn)
+	conn2, err := rt.Conn(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if conn2.id != 2 {
+		t.Errorf("expected conn id 2 after reconnect, got %d", conn2.id)
+	}
+}
+
+func TestDialReconnectingTransportConnectError(t *testing.T) {
+	failing := ConnectorFunc[*mockConn](func(ctx context.Context) (*mockConn, error) {
+		return nil, errors.New("connection refused")
+	})
+
+	rt, err := DialReconnectingTransport(context.Background(), failing, newMockCloser())
+	if err == nil {
+		t.Fatal("expected error from DialReconnectingTransport")
+	}
+	if rt != nil {
+		t.Error("expected nil transport on error")
+	}
+}
+
+func TestDialReconnectingTransportCallbacks(t *testing.T) {
+	var counter atomic.Int32
+	var connected bool
+	ctx := context.Background()
+
+	rt, err := DialReconnectingTransport(ctx, newMockConnector(&counter, 0), newMockCloser(),
+		WithOnConnect(func() { connected = true }),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer rt.Close()
+
+	if !connected {
+		t.Error("expected OnConnect callback to fire during Dial")
+	}
+}
+
 func TestReconnectingTransportLazyConnect(t *testing.T) {
 	var counter atomic.Int32
 	ctx := context.Background()

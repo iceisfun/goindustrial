@@ -22,6 +22,8 @@ type ReconnectingTransport[C comparable] struct {
 
 // NewReconnectingTransport creates a transport that connects lazily and
 // reconnects on failure. The constructor never fails and never connects.
+// Use [DialReconnectingTransport] when you want to verify reachability at
+// construction time.
 func NewReconnectingTransport[C comparable](connector Connector[C], closer Closer[C], opts ...Option) *ReconnectingTransport[C] {
 	cfg := applyOptions(opts)
 	return &ReconnectingTransport[C]{
@@ -29,6 +31,19 @@ func NewReconnectingTransport[C comparable](connector Connector[C], closer Close
 		closer:    closer,
 		cfg:       cfg,
 	}
+}
+
+// DialReconnectingTransport creates a reconnecting transport and immediately
+// establishes a connection to verify reachability. It returns an error if the
+// initial connection fails. Subsequent calls to [ReconnectingTransport.Conn]
+// will reconnect automatically after failures, just like a transport created
+// with [NewReconnectingTransport].
+func DialReconnectingTransport[C comparable](ctx context.Context, connector Connector[C], closer Closer[C], opts ...Option) (*ReconnectingTransport[C], error) {
+	rt := NewReconnectingTransport(connector, closer, opts...)
+	if _, err := rt.Conn(ctx); err != nil {
+		return nil, fmt.Errorf("reconnecting transport dial: %w", err)
+	}
+	return rt, nil
 }
 
 // Conn returns the current connection, creating a new one via the Connector
