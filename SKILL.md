@@ -30,6 +30,8 @@ SKILLS:
 - Clusterable interface: Modbus data point types (HoldingRegister, InputRegister, Coil, DiscreteInput) implement ClusterKey/ClusterAddr/ClusterQty/ClusterMerge/ClusterExtract for protocol-agnostic clustering.
 - Modbus data areas: Coils (bool R/W), Discrete Inputs (bool R), Holding Registers (uint16 R/W), Input Registers (uint16 R).
 - CIP data types: BOOL(0xC1), SINT(int8), INT(int16), DINT(int32), LINT(int64), USINT(uint8), UINT(uint16), UDINT(uint32), ULINT(uint64), REAL(float32), LREAL(float64), STRING(0xD0).
+- Custom CIP types: implement cip.TypeCodec (MarshalCIP + UnmarshalCIP + CIPType()) and call cip.RegisterType(code, factory) at init() time. Optional fmt.Stringer for display name. cip.LookupType(code) returns codec; DataType.String() resolves registered names.
+- Vendor packages: vendor/rockwell provides TypeCodec wrappers for Timer, Counter, PID, Control. Call rockwell.RegisterTimer(dt), etc. with controller-specific type codes from ListTags.
 - Error classification: Modbus protocol errors (IsModbusError) are not retried; transport errors trigger Reset + retry. Same pattern for EIP: cipError not retried, transport errors retried.
 - Servers: modbus.NewServer(addr, opts...) and ethernetip.NewServer(router, opts...). Both support net.Pipe injection for testing.
 - EIP server has session management (unique handles, validation), ListIdentity/ListServices, client tracking (ConnectedClients()), connect/disconnect callbacks.
@@ -254,6 +256,52 @@ services, err := client.ListServices(ctx)
 | REAL | 0xCA | `float32` |
 | LREAL | 0xCB | `float64` |
 | STRING | 0xD0 | `string` |
+
+### Custom CIP Types (TypeCodec Registry)
+
+Vendor-specific and site-specific struct types (UDTs, AOIs) can be registered
+so they decode, encode, and display by name instead of `UNKNOWN(0x…)`.
+
+```go
+// 1. Define a struct with MarshalCIP, UnmarshalCIP, CIPType, and optional String.
+type SetOn3Timer struct {
+    PRE int32
+    ACC int32
+    EN, EN2, EN3, TT, DN bool
+}
+
+func (s *SetOn3Timer) CIPType() cip.DataType         { return 0x2F83 }
+func (s *SetOn3Timer) String() string                  { return "SET_ON_3_TMR" }
+func (s *SetOn3Timer) UnmarshalCIP(data []byte) error  { /* decode wire layout */ }
+func (s *SetOn3Timer) MarshalCIP() ([]byte, error)     { /* encode wire layout */ }
+
+// 2. Register at init() time.
+func init() {
+    cip.RegisterType(0x2F83, func() cip.TypeCodec { return new(SetOn3Timer) })
+}
+
+// 3. Now works automatically:
+cip.DataType(0x2F83).String()    // "SET_ON_3_TMR"
+cip.LookupType(0x2F83)           // returns *SetOn3Timer codec
+cip.GoTypeToCIPType(&myStruct)   // returns 0x2F83
+ethernetip.Read[SetOn3Timer](client, ctx, "MyTag") // typed read
+```
+
+For well-known Rockwell types, use the `vendor/rockwell` package:
+
+```go
+import "github.com/iceisfun/goindustrial/protocol/ethernetip/vendor/rockwell"
+
+func init() {
+    // Type codes are controller-specific — discover via ListTags
+    rockwell.RegisterTimer(0x02B3)
+    rockwell.RegisterCounter(0x02B4)
+    rockwell.RegisterPID(0x02B5)
+    rockwell.RegisterControl(0x02B6)
+}
+```
+
+Available Rockwell types: `Timer`, `Counter`, `PID`, `Control`.
 
 ### EtherNet/IP DataPoints (for plc.PLC / monitor)
 
@@ -764,7 +812,7 @@ Runnable examples under `examples/` covering every operation, each with its own 
 
 **Modbus:** read_registers, write_registers, read_coils, write_coils, read_write_registers, device_identification, server, reconnecting, all_data_types, hexdump
 
-**EtherNet/IP:** read_tag, write_tag, read_tag_typed, timer_counter, list_tags, list_identity, server, reconnecting, probe, adapter, io_scanner, hexdump
+**EtherNet/IP:** read_tag, write_tag, read_tag_typed, timer_counter, list_tags, list_identity, server, reconnecting, probe, adapter, io_scanner, hexdump, custom_type
 
 **Cross-protocol:** monitor_polling, monitor_subscriber, plc_interface
 
@@ -789,6 +837,7 @@ Good defaults:
 - Use `ethernetip.Read[T]` generics for typed reads; use `ReadTagInto` when you have a pointer to unmarshal into.
 - For EIP, `ReadTag` returns raw bytes with a 2-byte type code prefix; `ReadTagInto` strips it automatically.
 - Timer and Counter are 14-byte Rockwell structures: `Reserved(2) + StatusBits(4) + PRE(4) + ACC(4)`.
+- For vendor-specific struct types (UDTs, AOIs), implement `cip.TypeCodec` and call `cip.RegisterType` at init() time. Use `vendor/rockwell` for known Rockwell types. Type codes are controller-specific — discover them via `ListTags`.
 - `WithRetries(-1)` means infinite retries for long-running applications.
 - Both servers support `WithServerConn(net.Conn)` for deterministic in-process testing with `net.Pipe`.
 - The monitor works with any `plc.Reader` -- you can poll Modbus and EtherNet/IP through the same monitor.

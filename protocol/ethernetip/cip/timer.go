@@ -7,14 +7,22 @@ import (
 )
 
 // Timer represents a Rockwell Logix timer structure (TON, TOF, RTO).
-// Rockwell timers are vendor-specific 14-byte structures stored in PLC memory.
+// Rockwell timers are vendor-specific structures stored in PLC memory.
 //
-// The wire layout is:
+// Two wire layouts are supported:
+//
+// 14-byte layout (older firmware / ControlLogix):
 //
 //	Offset 0-1:   Reserved (INT)
 //	Offset 2-5:   Status bits (DINT) -- EN, TT, DN packed in the high bits
 //	Offset 6-9:   PRE (DINT) -- preset value in milliseconds
 //	Offset 10-13: ACC (DINT) -- accumulated time in milliseconds
+//
+// 12-byte layout (newer firmware / CompactLogix):
+//
+//	Offset 0-3:   Status bits (DINT) -- EN, TT, DN packed in the high bits
+//	Offset 4-7:   PRE (DINT) -- preset value in milliseconds
+//	Offset 8-11:  ACC (DINT) -- accumulated time in milliseconds
 //
 // Use [DecodeTimer] or [Timer.UnmarshalCIP] to decode from raw bytes.
 type Timer struct {
@@ -35,26 +43,24 @@ const (
 	TimerStatusDN = 29
 )
 
-// DecodeTimer decodes a byte slice into a Timer struct. It expects at least
-// 14 bytes in the canonical Rockwell Logix timer memory layout.
+// DecodeTimer decodes a byte slice into a Timer struct. It accepts 12 bytes
+// (status + PRE + ACC) or 14 bytes (reserved + status + PRE + ACC).
 func DecodeTimer(data []byte) (*Timer, error) {
-	if len(data) < 14 {
-		return nil, fmt.Errorf("insufficient data for Timer: expected at least 14 bytes, got %d", len(data))
+	var statusOff, preOff, accOff int
+	switch {
+	case len(data) >= 14:
+		// 14-byte layout: reserved(2) + status(4) + PRE(4) + ACC(4)
+		statusOff, preOff, accOff = 2, 6, 10
+	case len(data) >= 12:
+		// 12-byte layout: status(4) + PRE(4) + ACC(4)
+		statusOff, preOff, accOff = 0, 4, 8
+	default:
+		return nil, fmt.Errorf("insufficient data for Timer: expected at least 12 bytes, got %d", len(data))
 	}
 
-	// Offset 0-1: Reserved (skip)
-
-	// Offset 2-5: Status Bits (DINT)
-	status := int32(binary.LittleEndian.Uint32(data[2:6]))
-
-	// Offset 6-9: PRE (DINT)
-	pre := int32(binary.LittleEndian.Uint32(data[6:10]))
-
-	// Offset 10-13: ACC (DINT)
-	acc := int32(binary.LittleEndian.Uint32(data[10:14]))
-
-	// Use uint32 for status bit checks to avoid overflow issues with bit 31
-	statusU := uint32(status)
+	statusU := binary.LittleEndian.Uint32(data[statusOff : statusOff+4])
+	pre := int32(binary.LittleEndian.Uint32(data[preOff : preOff+4]))
+	acc := int32(binary.LittleEndian.Uint32(data[accOff : accOff+4]))
 
 	t := &Timer{
 		PRE: pre,

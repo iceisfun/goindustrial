@@ -7,14 +7,22 @@ import (
 )
 
 // Counter represents a Rockwell Logix counter structure (CTU, CTD, CTUD).
-// Rockwell counters are vendor-specific 14-byte structures stored in PLC memory.
+// Rockwell counters are vendor-specific structures stored in PLC memory.
 //
-// The wire layout is:
+// Two wire layouts are supported:
+//
+// 14-byte layout (older firmware / ControlLogix):
 //
 //	Offset 0-1:   Reserved (INT)
 //	Offset 2-5:   Status bits (DINT) -- CU, CD, DN, OV, UN packed in the high bits
 //	Offset 6-9:   PRE (DINT) -- preset value
 //	Offset 10-13: ACC (DINT) -- accumulated count
+//
+// 12-byte layout (newer firmware / CompactLogix):
+//
+//	Offset 0-3:   Status bits (DINT) -- CU, CD, DN, OV, UN packed in the high bits
+//	Offset 4-7:   PRE (DINT) -- preset value
+//	Offset 8-11:  ACC (DINT) -- accumulated count
 //
 // Use [DecodeCounter] or [Counter.UnmarshalCIP] to decode from raw bytes.
 type Counter struct {
@@ -41,26 +49,24 @@ const (
 	CounterStatusUN = 27
 )
 
-// DecodeCounter decodes a byte slice into a Counter struct. It expects at
-// least 14 bytes in the canonical Rockwell Logix counter memory layout.
+// DecodeCounter decodes a byte slice into a Counter struct. It accepts 12 bytes
+// (status + PRE + ACC) or 14 bytes (reserved + status + PRE + ACC).
 func DecodeCounter(data []byte) (*Counter, error) {
-	if len(data) < 14 {
-		return nil, fmt.Errorf("insufficient data for Counter: expected at least 14 bytes, got %d", len(data))
+	var statusOff, preOff, accOff int
+	switch {
+	case len(data) >= 14:
+		// 14-byte layout: reserved(2) + status(4) + PRE(4) + ACC(4)
+		statusOff, preOff, accOff = 2, 6, 10
+	case len(data) >= 12:
+		// 12-byte layout: status(4) + PRE(4) + ACC(4)
+		statusOff, preOff, accOff = 0, 4, 8
+	default:
+		return nil, fmt.Errorf("insufficient data for Counter: expected at least 12 bytes, got %d", len(data))
 	}
 
-	// Offset 0-1: Reserved (skip)
-
-	// Offset 2-5: Status Bits (DINT)
-	status := int32(binary.LittleEndian.Uint32(data[2:6]))
-
-	// Offset 6-9: PRE (DINT)
-	pre := int32(binary.LittleEndian.Uint32(data[6:10]))
-
-	// Offset 10-13: ACC (DINT)
-	acc := int32(binary.LittleEndian.Uint32(data[10:14]))
-
-	// Use uint32 for status bit checks
-	statusU := uint32(status)
+	statusU := binary.LittleEndian.Uint32(data[statusOff : statusOff+4])
+	pre := int32(binary.LittleEndian.Uint32(data[preOff : preOff+4]))
+	acc := int32(binary.LittleEndian.Uint32(data[accOff : accOff+4]))
 
 	c := &Counter{
 		PRE: pre,

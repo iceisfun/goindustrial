@@ -188,11 +188,17 @@ func (d DataType) Base() DataType {
 }
 
 // String returns a human-readable name for the data type (e.g. "DINT",
-// "REAL[]").
+// "REAL[]"). If the type code is not a built-in CIP type, the registry is
+// checked for a custom type registered via [RegisterType] whose TypeCodec
+// implements [fmt.Stringer].
 func (d DataType) String() string {
 	base := d.Base()
 	name, ok := typeNames[base]
 	if !ok {
+		// Check the custom type registry.
+		name = lookupTypeName(base)
+	}
+	if name == "" {
 		if d.IsArray() {
 			return fmt.Sprintf("UNKNOWN(0x%04X)[]", uint16(base))
 		}

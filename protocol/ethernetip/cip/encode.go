@@ -32,8 +32,12 @@ func Marshal(v any) ([]byte, error) {
 
 // GoTypeToCIPType maps a Go value's type to the corresponding CIP [DataType]
 // code. It supports bool, all signed/unsigned integer sizes, float32, float64,
-// and string.
+// string, and any type implementing [TypeCodec].
 func GoTypeToCIPType(v any) (DataType, error) {
+	// Check TypeCodec first so custom struct types are handled.
+	if tc, ok := v.(TypeCodec); ok {
+		return tc.CIPType(), nil
+	}
 	switch v.(type) {
 	case bool:
 		return TypeBOOL, nil

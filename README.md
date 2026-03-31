@@ -272,6 +272,7 @@ Every example is a standalone `main.go` with its own README explaining the relev
 | [`ethernetip/adapter`](examples/ethernetip/adapter/) | Implicit I/O adapter: accepts Forward_Open, cyclic UDP exchange |
 | [`ethernetip/io_scanner`](examples/ethernetip/io_scanner/) | Implicit I/O scanner: sends Forward_Open, cyclic UDP exchange |
 | [`ethernetip/hexdump`](examples/ethernetip/hexdump/) | Wire-level hex dump tracing to stdout or file |
+| [`ethernetip/custom_type`](examples/ethernetip/custom_type/) | Register custom CIP struct types (UDTs/AOIs) with TypeCodec |
 
 ### Cross-Protocol
 
