@@ -3,8 +3,13 @@ package lua
 import (
 	"fmt"
 
-	"github.com/iceisfun/golua/vm"
+	"github.com/iceisfun/golua/v2/vm"
 )
+
+// luaErrorf raises a Lua-visible error from a native function.
+func luaErrorf(format string, args ...any) {
+	panic(&vm.LuaError{Value: vm.NewString(fmt.Sprintf(format, args...))})
+}
 
 // getString returns the string at stack index idx or panics with a Lua error.
 func getString(v *vm.VM, idx int, fname string) string {
@@ -12,7 +17,8 @@ func getString(v *vm.VM, idx int, fname string) string {
 	if val.IsString() {
 		return val.AsString()
 	}
-	panic(fmt.Sprintf("bad argument #%d to '%s' (string expected, got %s)", idx, fname, val.Type()))
+	luaErrorf("bad argument #%d to '%s' (string expected, got %s)", idx, fname, val.Type())
+	return ""
 }
 
 // getInt returns the integer at stack index idx or panics with a Lua error.
@@ -21,7 +27,8 @@ func getInt(v *vm.VM, idx int, fname string) int64 {
 	if val.IsNumber() {
 		return val.AsInt()
 	}
-	panic(fmt.Sprintf("bad argument #%d to '%s' (number expected, got %s)", idx, fname, val.Type()))
+	luaErrorf("bad argument #%d to '%s' (number expected, got %s)", idx, fname, val.Type())
+	return 0
 }
 
 // getOptInt returns the integer at stack index idx, or defaultVal if nil.
@@ -54,7 +61,8 @@ func getTable(v *vm.VM, idx int, fname string) vm.LuaTable {
 	if val.IsTable() {
 		return val.AsTable()
 	}
-	panic(fmt.Sprintf("bad argument #%d to '%s' (table expected, got %s)", idx, fname, val.Type()))
+	luaErrorf("bad argument #%d to '%s' (table expected, got %s)", idx, fname, val.Type())
+	return nil
 }
 
 // tableGetString reads a string field from a table, returning "" if missing.

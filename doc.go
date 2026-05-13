@@ -30,5 +30,5 @@
 //   - [github.com/iceisfun/goindustrial/logging] — structured logging interface
 //     used throughout the module.
 //   - [github.com/iceisfun/goindustrial/lua] — optional Lua scripting bindings
-//     via [github.com/iceisfun/golua].
+//     via [github.com/iceisfun/golua/v2].
 package goindustrial

@@ -3,11 +3,10 @@ package lua
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
 	"math"
 	"time"
 
-	"github.com/iceisfun/golua/vm"
+	"github.com/iceisfun/golua/v2/vm"
 	"github.com/iceisfun/goindustrial/logging"
 	"github.com/iceisfun/goindustrial/protocol/modbus"
 )
@@ -70,7 +69,7 @@ func modbusConnect(v *vm.VM) int {
 		modbus.WithLogger(logging.NewNopLogger()),
 	)
 	if err != nil {
-		panic(fmt.Sprintf("modbus.connect: %s", err.Error()))
+		luaErrorf("modbus.connect: %s", err.Error())
 	}
 
 	v.Set(0, vm.NewTable(modbusClientToLua(client, ctx)))
@@ -91,7 +90,7 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 
 		regs, err := client.ReadHoldingRegisters(ctx, address, quantity)
 		if err != nil {
-			panic(fmt.Sprintf("read_holding_registers: %s", err.Error()))
+			luaErrorf("read_holding_registers: %s", err.Error())
 		}
 
 		v.Set(0, vm.NewTable(registersToLuaTable(regs)))
@@ -105,7 +104,7 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 
 		regs, err := client.ReadInputRegisters(ctx, address, quantity)
 		if err != nil {
-			panic(fmt.Sprintf("read_input_registers: %s", err.Error()))
+			luaErrorf("read_input_registers: %s", err.Error())
 		}
 
 		v.Set(0, vm.NewTable(registersToLuaTable(regs)))
@@ -119,7 +118,7 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 
 		vals, err := client.ReadCoils(ctx, address, quantity)
 		if err != nil {
-			panic(fmt.Sprintf("read_coils: %s", err.Error()))
+			luaErrorf("read_coils: %s", err.Error())
 		}
 
 		v.Set(0, vm.NewTable(boolsToLuaTable(vals)))
@@ -133,7 +132,7 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 
 		vals, err := client.ReadDiscreteInputs(ctx, address, quantity)
 		if err != nil {
-			panic(fmt.Sprintf("read_discrete_inputs: %s", err.Error()))
+			luaErrorf("read_discrete_inputs: %s", err.Error())
 		}
 
 		v.Set(0, vm.NewTable(boolsToLuaTable(vals)))
@@ -146,7 +145,7 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 		value := modbus.RegisterValue(getInt(v, 3, "client:write_register"))
 
 		if err := client.WriteSingleRegister(ctx, address, value); err != nil {
-			panic(fmt.Sprintf("write_register: %s", err.Error()))
+			luaErrorf("write_register: %s", err.Error())
 		}
 
 		return 0
@@ -159,7 +158,7 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 
 		values := luaTableToRegisters(tbl)
 		if err := client.WriteMultipleRegisters(ctx, address, values); err != nil {
-			panic(fmt.Sprintf("write_registers: %s", err.Error()))
+			luaErrorf("write_registers: %s", err.Error())
 		}
 
 		return 0
@@ -170,11 +169,11 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 		address := modbus.Address(getInt(v, 2, "client:write_coil"))
 		val := v.Get(3)
 		if !val.IsBool() {
-			panic("bad argument #2 to 'client:write_coil' (boolean expected)")
+			luaErrorf("bad argument #2 to 'client:write_coil' (boolean expected)")
 		}
 
 		if err := client.WriteSingleCoil(ctx, address, val.AsBool()); err != nil {
-			panic(fmt.Sprintf("write_coil: %s", err.Error()))
+			luaErrorf("write_coil: %s", err.Error())
 		}
 
 		return 0
@@ -187,7 +186,7 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 
 		values := luaTableToCoils(tbl)
 		if err := client.WriteMultipleCoils(ctx, address, values); err != nil {
-			panic(fmt.Sprintf("write_coils: %s", err.Error()))
+			luaErrorf("write_coils: %s", err.Error())
 		}
 
 		return 0
@@ -203,7 +202,7 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 		writeValues := luaTableToRegisters(tbl)
 		regs, err := client.ReadWriteMultipleRegisters(ctx, readAddr, readQty, writeAddr, writeValues)
 		if err != nil {
-			panic(fmt.Sprintf("read_write_registers: %s", err.Error()))
+			luaErrorf("read_write_registers: %s", err.Error())
 		}
 
 		v.Set(0, vm.NewTable(registersToLuaTable(regs)))
@@ -215,7 +214,7 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 		// self at index 1, no other args
 		devID, err := client.ReadDeviceIdentification(ctx, modbus.ReadDeviceIDBasicStream, modbus.DeviceIDVendorName)
 		if err != nil {
-			panic(fmt.Sprintf("read_device_id: %s", err.Error()))
+			luaErrorf("read_device_id: %s", err.Error())
 		}
 
 		result := vm.NewEmptyTable()
@@ -255,7 +254,7 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 	t.SetString("close", vm.NewNativeFunc(func(v *vm.VM) int {
 		// self at index 1
 		if err := client.Close(); err != nil {
-			panic(fmt.Sprintf("close: %s", err.Error()))
+			luaErrorf("close: %s", err.Error())
 		}
 		return 0
 	}))
@@ -267,14 +266,14 @@ func modbusClientToLua(client *modbus.Client, ctx context.Context) *vm.Table {
 func luaTableToRegisters(tbl vm.LuaTable) []modbus.RegisterValue {
 	length := tbl.Len()
 	if length <= 0 {
-		panic("expected a non-empty table of register values")
+		luaErrorf("expected a non-empty table of register values")
 	}
 
 	values := make([]modbus.RegisterValue, length)
 	for i := 1; i <= length; i++ {
 		val := tbl.Get(vm.NewInt(int64(i)))
 		if !val.IsNumber() {
-			panic(fmt.Sprintf("table element %d: number expected, got %s", i, val.Type()))
+			luaErrorf("table element %d: number expected, got %s", i, val.Type())
 		}
 		values[i-1] = modbus.RegisterValue(val.AsInt())
 	}
@@ -285,14 +284,14 @@ func luaTableToRegisters(tbl vm.LuaTable) []modbus.RegisterValue {
 func luaTableToCoils(tbl vm.LuaTable) []modbus.CoilValue {
 	length := tbl.Len()
 	if length <= 0 {
-		panic("expected a non-empty table of boolean values")
+		luaErrorf("expected a non-empty table of boolean values")
 	}
 
 	values := make([]modbus.CoilValue, length)
 	for i := 1; i <= length; i++ {
 		val := tbl.Get(vm.NewInt(int64(i)))
 		if !val.IsBool() {
-			panic(fmt.Sprintf("table element %d: boolean expected, got %s", i, val.Type()))
+			luaErrorf("table element %d: boolean expected, got %s", i, val.Type())
 		}
 		values[i-1] = val.AsBool()
 	}

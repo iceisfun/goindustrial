@@ -7,8 +7,8 @@
 // Usage:
 //
 //	import (
-//	    "github.com/iceisfun/golua/vm"
-//	    "github.com/iceisfun/golua/stdlib"
+//	    "github.com/iceisfun/golua/v2/vm"
+//	    "github.com/iceisfun/golua/v2/stdlib"
 //	    industrialLua "github.com/iceisfun/goindustrial/lua"
 //	)
 //
@@ -26,7 +26,7 @@
 package lua
 
 import (
-	"github.com/iceisfun/golua/vm"
+	"github.com/iceisfun/golua/v2/vm"
 )
 
 // Open registers the goindustrial modules (modbus, eip) as globals in the VM.

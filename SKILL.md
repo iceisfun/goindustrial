@@ -41,7 +41,7 @@ SKILLS:
 - Monitor subscribers: mon.NewSubscriber(bufferSize) returns Subscriber with buffered channel. sub.All() is iter.Seq[Event] for for-range. sub.Done() to unregister. Never blocks the monitor.
 - plc.Value carries Type (DataType enum) and ByteOrder. Helper methods: val.Bool(), val.Int(), val.Uint(), val.Float32(), val.Float64() decode Raw using the value's byte order.
 - Device probe: examples/ethernetip/probe scans identity, TCP/IP interface, Ethernet link, assembly instances, CIP object classes, connection manager stats, and optionally Logix tags.
-- Optional Lua bindings (lua/ package, requires github.com/iceisfun/golua): industrialLua.Open(v) registers "modbus" and "eip" Lua globals.
+- Optional Lua bindings (lua/ package, requires github.com/iceisfun/golua/v2 — Lua 5.5.0): industrialLua.Open(v) registers "modbus" and "eip" Lua globals.
 - Lua modbus API: modbus.connect(addr, opts) -> client, client:read_holding_registers(addr, qty), client:write_register(addr, val), etc.
 - Lua eip API: eip.connect(addr, opts) -> client, client:read_tag(name) -> auto-typed value, client:write_tag(name, val), client:list_tags(), etc.
 - Lua methods use colon syntax (client:method(args)); the self parameter is handled automatically.
@@ -715,12 +715,12 @@ conn, _ := ethernetip.NewTCPConn("", ethernetip.WithConn(clientConn))
 
 ## Lua Scripting Bindings (Optional)
 
-The `lua/` package provides [GoLua](https://github.com/iceisfun/golua) bindings. Import it separately — the core library remains zero-dependency.
+The `lua/` package provides [GoLua v2 (Lua 5.5.0)](https://github.com/iceisfun/golua) bindings. Import it separately — the core library remains zero-dependency.
 
 ```go
 import (
-    "github.com/iceisfun/golua/vm"
-    "github.com/iceisfun/golua/stdlib"
+    "github.com/iceisfun/golua/v2/vm"
+    "github.com/iceisfun/golua/v2/stdlib"
     industrialLua "github.com/iceisfun/goindustrial/lua"
 )
 

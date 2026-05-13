@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/iceisfun/golua/vm"
+	"github.com/iceisfun/golua/v2/vm"
 	"github.com/iceisfun/goindustrial/logging"
 	"github.com/iceisfun/goindustrial/protocol/ethernetip"
 	"github.com/iceisfun/goindustrial/protocol/ethernetip/cip"
@@ -83,7 +83,7 @@ func eipConnect(v *vm.VM) int {
 		ethernetip.WithLogger(logging.NewNopLogger()),
 	)
 	if err != nil {
-		panic(fmt.Sprintf("eip.connect: %s", err.Error()))
+		luaErrorf("eip.connect: %s", err.Error())
 	}
 
 	v.Set(0, vm.NewTable(eipClientToLua(client, ctx)))
@@ -103,7 +103,7 @@ func eipClientToLua(client *ethernetip.Client, ctx context.Context) *vm.Table {
 
 		data, err := client.ReadTag(ctx, tagName)
 		if err != nil {
-			panic(fmt.Sprintf("read_tag(%q): %s", tagName, err.Error()))
+			luaErrorf("read_tag(%q): %s", tagName, err.Error())
 		}
 
 		v.Set(0, cipDataToLuaValue(data))
@@ -117,7 +117,7 @@ func eipClientToLua(client *ethernetip.Client, ctx context.Context) *vm.Table {
 
 		data, err := client.ReadTagElements(ctx, tagName, count)
 		if err != nil {
-			panic(fmt.Sprintf("read_tag_raw(%q): %s", tagName, err.Error()))
+			luaErrorf("read_tag_raw(%q): %s", tagName, err.Error())
 		}
 
 		v.Set(0, vm.NewString(string(data)))
@@ -133,13 +133,13 @@ func eipClientToLua(client *ethernetip.Client, ctx context.Context) *vm.Table {
 		for i := 1; i <= length; i++ {
 			tagVal := tbl.Get(vm.NewInt(int64(i)))
 			if !tagVal.IsString() {
-				panic(fmt.Sprintf("read_tags: element %d must be a string tag name", i))
+				luaErrorf("read_tags: element %d must be a string tag name", i)
 			}
 			tagName := tagVal.AsString()
 
 			data, err := client.ReadTag(ctx, tagName)
 			if err != nil {
-				panic(fmt.Sprintf("read_tags(%q): %s", tagName, err.Error()))
+				luaErrorf("read_tags(%q): %s", tagName, err.Error())
 			}
 
 			result.Set(vm.NewInt(int64(i)), cipDataToLuaValue(data))
@@ -158,7 +158,7 @@ func eipClientToLua(client *ethernetip.Client, ctx context.Context) *vm.Table {
 		goVal := luaValueToGoForWrite(luaVal, typeHint)
 
 		if err := client.WriteTag(ctx, tagName, goVal); err != nil {
-			panic(fmt.Sprintf("write_tag(%q): %s", tagName, err.Error()))
+			luaErrorf("write_tag(%q): %s", tagName, err.Error())
 		}
 
 		return 0
@@ -170,7 +170,7 @@ func eipClientToLua(client *ethernetip.Client, ctx context.Context) *vm.Table {
 
 		timer, err := client.ReadTimer(ctx, tagName)
 		if err != nil {
-			panic(fmt.Sprintf("read_timer(%q): %s", tagName, err.Error()))
+			luaErrorf("read_timer(%q): %s", tagName, err.Error())
 		}
 
 		result := vm.NewEmptyTable()
@@ -190,11 +190,11 @@ func eipClientToLua(client *ethernetip.Client, ctx context.Context) *vm.Table {
 
 		data, err := client.ReadTag(ctx, tagName)
 		if err != nil {
-			panic(fmt.Sprintf("read_counter(%q): %s", tagName, err.Error()))
+			luaErrorf("read_counter(%q): %s", tagName, err.Error())
 		}
 
 		if len(data) < 2 {
-			panic(fmt.Sprintf("read_counter(%q): response too short", tagName))
+			luaErrorf("read_counter(%q): response too short", tagName)
 		}
 		typeCode := cip.DataType(binary.LittleEndian.Uint16(data[0:2]))
 		hdrLen := 2
@@ -202,12 +202,12 @@ func eipClientToLua(client *ethernetip.Client, ctx context.Context) *vm.Table {
 			hdrLen = 4
 		}
 		if len(data) < hdrLen {
-			panic(fmt.Sprintf("read_counter(%q): response too short for header", tagName))
+			luaErrorf("read_counter(%q): response too short for header", tagName)
 		}
 
 		counter, err := cip.DecodeCounter(data[hdrLen:])
 		if err != nil {
-			panic(fmt.Sprintf("read_counter(%q): %s", tagName, err.Error()))
+			luaErrorf("read_counter(%q): %s", tagName, err.Error())
 		}
 
 		result := vm.NewEmptyTable()
@@ -228,7 +228,7 @@ func eipClientToLua(client *ethernetip.Client, ctx context.Context) *vm.Table {
 		// self at index 1, no other args
 		tags, err := client.ListTags(ctx)
 		if err != nil {
-			panic(fmt.Sprintf("list_tags: %s", err.Error()))
+			luaErrorf("list_tags: %s", err.Error())
 		}
 
 		result := vm.NewEmptyTable()
@@ -248,7 +248,7 @@ func eipClientToLua(client *ethernetip.Client, ctx context.Context) *vm.Table {
 	t.SetString("close", vm.NewNativeFunc(func(v *vm.VM) int {
 		// self at index 1
 		if err := client.Close(); err != nil {
-			panic(fmt.Sprintf("close: %s", err.Error()))
+			luaErrorf("close: %s", err.Error())
 		}
 		return 0
 	}))
@@ -353,7 +353,8 @@ func luaValueToGoForWrite(val vm.Value, typeHint string) any {
 	case val.IsString():
 		return val.AsString()
 	default:
-		panic(fmt.Sprintf("write_tag: unsupported Lua type %s", val.Type()))
+		luaErrorf("write_tag: unsupported Lua type %s", val.Type())
+		return nil
 	}
 }
 
@@ -389,6 +390,7 @@ func luaValueWithTypeHint(val vm.Value, hint string) any {
 	case "STRING":
 		return val.AsString()
 	default:
-		panic(fmt.Sprintf("write_tag: unknown CIP type %q", hint))
+		luaErrorf("write_tag: unknown CIP type %q", hint)
+		return nil
 	}
 }

@@ -4,7 +4,7 @@
 
 A unified Go library for industrial communication protocols. Consolidates **Modbus TCP** and **EtherNet/IP (CIP)** under common abstractions for transport, logging, monitoring, and PLC access.
 
-Zero external dependencies for core protocols. Pure Go. Go 1.25+. The optional `lua/` package requires [GoLua](https://github.com/iceisfun/golua).
+Zero external dependencies for core protocols. Pure Go. Go 1.25+. The optional `lua/` package requires [GoLua v2 (Lua 5.5.0)](https://github.com/iceisfun/golua).
 
 ## Package Structure
 
@@ -23,7 +23,7 @@ goindustrial/
     protocol/ethernetip/objects/ CIP objects (Assembly, Connection Manager)
     protocol/ethernetip/runtime/ UDP I/O runtime and scheduler for implicit messaging
 
-    lua/                         Optional GoLua bindings (requires github.com/iceisfun/golua)
+    lua/                         Optional GoLua bindings (requires github.com/iceisfun/golua/v2)
     examples/                    Runnable examples with READMEs (see below)
 ```
 
@@ -165,12 +165,12 @@ Output:
 
 ### Lua Scripting (Optional)
 
-The `lua/` package provides [GoLua](https://github.com/iceisfun/golua) bindings so Lua scripts can drive Modbus and EtherNet/IP operations. This is useful for user-configurable data collection, alerting, and transformation logic without recompiling Go code.
+The `lua/` package provides [GoLua v2 (Lua 5.5.0)](https://github.com/iceisfun/golua) bindings so Lua scripts can drive Modbus and EtherNet/IP operations. This is useful for user-configurable data collection, alerting, and transformation logic without recompiling Go code.
 
 ```go
 import (
-    "github.com/iceisfun/golua/vm"
-    "github.com/iceisfun/golua/stdlib"
+    "github.com/iceisfun/golua/v2/vm"
+    "github.com/iceisfun/golua/v2/stdlib"
     industrialLua "github.com/iceisfun/goindustrial/lua"
 )
 
