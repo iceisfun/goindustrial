@@ -254,8 +254,10 @@ func (c *Client) Write(ctx context.Context, point plc.DataPoint, data []byte) er
 		elements = 1
 	}
 
-	p := cip.NewPath()
-	p.AddSymbolicSegment(tag.Name)
+	p, err := cip.ParseTagPath(tag.Name)
+	if err != nil {
+		return err
+	}
 	req := cip.NewWriteTagRequest(p, dataType, elements, data[2:])
 
 	return c.do(ctx, func(sess *Session) error {
@@ -292,12 +294,14 @@ func (c *Client) ReadTagElements(ctx context.Context, tagName string, count uint
 		return nil, fmt.Errorf("element count must be at least 1")
 	}
 
-	p := cip.NewPath()
-	p.AddSymbolicSegment(tagName)
+	p, err := cip.ParseTagPath(tagName)
+	if err != nil {
+		return nil, err
+	}
 	req := cip.NewReadTagRequest(p, count)
 
 	var result []byte
-	err := c.do(ctx, func(sess *Session) error {
+	err = c.do(ctx, func(sess *Session) error {
 		resp, err := sess.SendCIPRequest(ctx, req)
 		if err != nil {
 			return err
@@ -316,8 +320,10 @@ func (c *Client) ReadTagElements(ctx context.Context, tagName string, count uint
 // float64, etc.) or implement [cip.Marshaler]. The CIP type code is inferred
 // automatically from the Go type.
 func (c *Client) WriteTag(ctx context.Context, tagName string, value any) error {
-	p := cip.NewPath()
-	p.AddSymbolicSegment(tagName)
+	p, err := cip.ParseTagPath(tagName)
+	if err != nil {
+		return err
+	}
 
 	dataType, err := cip.GoTypeToCIPType(value)
 	if err != nil {
@@ -377,17 +383,39 @@ func (c *Client) ReadTagElementsInto(ctx context.Context, tagName string, count 
 
 // ReadTimer reads a Rockwell Logix Timer tag (TON, TOF, or RTO) from the PLC
 // and decodes it into a [cip.Timer] struct containing preset, accumulated, and
-// status-bit fields.
+// status-bit fields. The tag may use program-scope and member syntax accepted
+// by [cip.ParseTagPath] (e.g. "Program:MainProgram.MyTimer").
 func (c *Client) ReadTimer(ctx context.Context, tagName string) (*cip.Timer, error) {
+	payload, err := c.readStructPayload(ctx, tagName)
+	if err != nil {
+		return nil, err
+	}
+	return cip.DecodeTimer(payload)
+}
+
+// ReadCounter reads a Rockwell Logix Counter tag (CTU, CTD, CTUD) from the PLC
+// and decodes it into a [cip.Counter] struct containing preset, accumulated,
+// and status-bit fields. The tag may use program-scope and member syntax
+// accepted by [cip.ParseTagPath] (e.g. "Program:MainProgram.MyCounter").
+func (c *Client) ReadCounter(ctx context.Context, tagName string) (*cip.Counter, error) {
+	payload, err := c.readStructPayload(ctx, tagName)
+	if err != nil {
+		return nil, err
+	}
+	return cip.DecodeCounter(payload)
+}
+
+// readStructPayload reads a tag and strips the CIP type-code header, returning
+// just the structure payload bytes. It returns an error if the tag does not
+// resolve to a CIP STRUCT.
+func (c *Client) readStructPayload(ctx context.Context, tagName string) ([]byte, error) {
 	data, err := c.ReadTag(ctx, tagName)
 	if err != nil {
 		return nil, err
 	}
-
 	if len(data) < 2 {
 		return nil, fmt.Errorf("response too short to contain type code")
 	}
-
 	typeCode := cip.DataType(binary.LittleEndian.Uint16(data[0:2]))
 	hdrLen := 2
 	if typeCode >= cip.TypeSTRUCT {
@@ -396,8 +424,7 @@ func (c *Client) ReadTimer(ctx context.Context, tagName string) (*cip.Timer, err
 	if len(data) < hdrLen {
 		return nil, fmt.Errorf("response too short for type header")
 	}
-
-	return cip.DecodeTimer(data[hdrLen:])
+	return data[hdrLen:], nil
 }
 
 // ---------- Discovery / Enumeration ----------

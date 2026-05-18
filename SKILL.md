@@ -222,9 +222,33 @@ err = client.WriteTag(ctx, "MyBool", true)
 timer, err := client.ReadTimer(ctx, "MyTimer")
 
 // Counter: PRE, ACC (int32), CU, CD, DN, OV, UN (bools)
-var counter cip.Counter
-err = client.ReadTagInto(ctx, "MyCounter", &counter)
+counter, err := client.ReadCounter(ctx, "MyCounter")
+// Or unmarshal into a caller-allocated struct:
+var c cip.Counter
+err = client.ReadTagInto(ctx, "MyCounter", &c)
 ```
+
+### Tag Path Syntax
+
+All tag-level APIs (`ReadTag`, `ReadTagElements`, `ReadTagInto`, `WriteTag`,
+`ReadTimer`, `ReadCounter`, `Read[T]`, `ReadSlice[T]`, etc.) accept Logix-style
+tag strings and translate them into the multi-segment EPATH the controller
+requires. Splitting and array indexing is handled by `cip.ParseTagPath`:
+
+| Syntax                                  | What it addresses                          |
+| --------------------------------------- | ------------------------------------------ |
+| `MyTag`                                 | controller-scoped tag                      |
+| `MyStruct.Field`                        | struct/UDT member                          |
+| `MyArray[5]`                            | 1D array element                           |
+| `Matrix[2,3]`                           | 2D array element                           |
+| `Program:MainProgram.MyTag`             | program-scoped tag                         |
+| `Program:Foo.Bar[5].Baz`                | program scope + array + member             |
+| `Local:2:I.Data[0]`                     | module I/O tag (colons stay in the symbol) |
+| `MyDINT.5`                              | bit access (BOOL bit 5 of an integer)      |
+
+Only `.` and `[...]` are separators; `:` stays inside the symbol because it
+appears in program-scope and module I/O tag names. Passing
+`Program:MainProgram.Tote_Count_CNTR.ACC` to `ReadTag` Just Works.
 
 ### Discovery
 

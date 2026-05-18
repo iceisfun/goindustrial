@@ -12,6 +12,10 @@
 //   - EPATH construction: [Path] builds encoded paths that address CIP objects
 //     by class, instance, attribute, or symbolic tag name (ANSI Extended Symbol
 //     segment). Paths are the primary addressing mechanism in CIP.
+//     [ParseTagPath] converts a Logix-style tag string -- including program
+//     scope ("Program:MainProgram.MyTag"), member access ("MyStruct.Field"),
+//     and array indices ("MyArray[5]", "Matrix[2,3]") -- into the
+//     multi-segment EPATH the controller expects.
 //
 //   - Service helpers: [NewReadTagRequest] and [NewWriteTagRequest] construct
 //     Rockwell Logix Read Tag (0x4C) and Write Tag (0x4D) service requests.

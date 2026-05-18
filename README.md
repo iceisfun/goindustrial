@@ -80,7 +80,24 @@ err = client.WriteTag(ctx, "MyFloat", float32(3.14))
 // Read a timer
 timer, err := client.ReadTimer(ctx, "MyTimer")
 // timer.PRE, timer.ACC, timer.EN, timer.TT, timer.DN
+
+// Program-scoped tags and member access work the same way -- the library
+// parses the path and emits the multi-segment EPATH the controller requires.
+counter, err := client.ReadCounter(ctx, "Program:MainProgram.MyCounter")
+acc, err := ethernetip.Read[int32](client, ctx, "Program:MainProgram.MyCounter.ACC")
 ```
+
+Tag path syntax (handled by `cip.ParseTagPath`):
+
+| Syntax                            | Addresses                            |
+| --------------------------------- | ------------------------------------ |
+| `MyTag`                           | controller-scoped tag                |
+| `MyStruct.Field`                  | struct/UDT member                    |
+| `MyArray[5]` / `Matrix[2,3]`      | array element (1D, 2D, 3D)           |
+| `Program:MainProgram.MyTag`       | program-scoped tag                   |
+| `Program:Foo.Bar[5].Baz`          | program scope + array + member       |
+| `Local:2:I.Data[0]`               | module I/O tag                       |
+| `MyDINT.5`                        | BOOL bit access                      |
 
 ### Cross-Protocol Monitoring
 
