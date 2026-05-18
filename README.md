@@ -87,6 +87,43 @@ counter, err := client.ReadCounter(ctx, "Program:MainProgram.MyCounter")
 acc, err := ethernetip.Read[int32](client, ctx, "Program:MainProgram.MyCounter.ACC")
 ```
 
+### PCCC (SLC 500 / MicroLogix)
+
+Legacy Allen-Bradley controllers (SLC 5/0x, MicroLogix family) don't expose
+named tags — data lives in data-table files (`N7:0`, `B3:0/2`, `F8:5`,
+`T4:0.ACC`, `S:1`). The `pccc` sub-package builds PCCC commands and ships
+them through the existing EtherNet/IP session via the CIP Execute_PCCC
+service (class `0x67`, service `0x4B`):
+
+```go
+ctx := context.Background()
+
+// Standard EtherNet/IP connect; no PCCC-specific setup needed.
+eip, _ := ethernetip.Connect(ctx, "10.30.40.71")
+defer eip.Close()
+
+// High-level PCCC client implements plc.Reader / plc.Writer.
+plc := pccc.NewClient(eip)
+
+// Convenience methods address by SLC string.
+v, _   := plc.ReadAddress(ctx, "N7:0")         // -> plc.Value (int16)
+words, _ := plc.ReadWords(ctx, "N7:0", 10)      // -> []int16
+_ = plc.WriteAddress(ctx, "F8:5", float32(3.14))
+_ = plc.WriteAddress(ctx, "B3:0/2", true)       // read-modify-write
+
+// Timer / counter whole-element reads decode to typed structs.
+v, _ = plc.ReadAddress(ctx, "T4:0")
+tm, _ := pccc.DecodeTimer(v.Raw)                // tm.PRE, tm.ACC, tm.EN(), tm.DN()
+
+// pccc.File works as a plc.DataPoint with monitor.NewMonitor — see
+// examples/ethernetip/pccc_monitor.
+```
+
+Supported file types: `N` (integer), `B` (bit), `F` (float), `S` (status,
+file 2), `I` / `O` (input/output image), `T`/`C`/`R` (timer/counter/control
+with `.PRE`/`.ACC`/`.EN`/`.DN`/… fields), `ST` (string), `A` (ASCII),
+`D` (BCD). PLC-5 word-range commands are out of scope.
+
 Tag path syntax (handled by `cip.ParseTagPath`):
 
 | Syntax                            | Addresses                            |
@@ -236,6 +273,7 @@ plc:close()
 - Server with CIP MessageRouter dispatch
 - Assembly Object (Class 0x04) and Connection Manager (Class 0x06)
 - UDP I/O runtime for implicit messaging
+- PCCC tunneling (`pccc`): SLC/MicroLogix data-table reads and writes over Execute_PCCC (class 0x67, service 0x4B)
 
 ### Testing with net.Pipe
 
@@ -290,6 +328,9 @@ Every example is a standalone `main.go` with its own README explaining the relev
 | [`ethernetip/io_scanner`](examples/ethernetip/io_scanner/) | Implicit I/O scanner: sends Forward_Open, cyclic UDP exchange |
 | [`ethernetip/hexdump`](examples/ethernetip/hexdump/) | Wire-level hex dump tracing to stdout or file |
 | [`ethernetip/custom_type`](examples/ethernetip/custom_type/) | Register custom CIP struct types (UDTs/AOIs) with TypeCodec |
+| [`ethernetip/pccc_read`](examples/ethernetip/pccc_read/) | Read SLC/MicroLogix data-table addresses (N7:0, F8:5, B3:0/2, T4:0.ACC, S:1) over EtherNet/IP |
+| [`ethernetip/pccc_write`](examples/ethernetip/pccc_write/) | Write a single PCCC value with auto type coercion (int, float, bit RMW) |
+| [`ethernetip/pccc_monitor`](examples/ethernetip/pccc_monitor/) | Subscribe to PCCC addresses via `monitor.NewMonitor` and print changes |
 
 ### Cross-Protocol
 

@@ -30,6 +30,13 @@ type Client struct {
 	logger     logging.Logger
 	retries    int
 	retryDelay time.Duration
+
+	// PCCC requestor-ID fields. Used as the originator stamp on the
+	// CIP Execute_PCCC (0x4B) service. Default to the package-level
+	// DefaultCIP* values when not set via WithCIPVendorID /
+	// WithCIPSerialNumber.
+	cipVendorID     uint16
+	cipSerialNumber uint32
 }
 
 // Compile-time check that Client implements plc.PLC.
@@ -39,10 +46,12 @@ var _ plc.PLC = (*Client)(nil)
 // [ClientOption] values to configure retries, logging, and other behavior.
 func NewClient(t transport.Transport[*Session], opts ...ClientOption) *Client {
 	c := &Client{
-		transport:  t,
-		logger:     logging.NewNopLogger(),
-		retries:    0,
-		retryDelay: 1 * time.Second,
+		transport:       t,
+		logger:          logging.NewNopLogger(),
+		retries:         0,
+		retryDelay:      1 * time.Second,
+		cipVendorID:     DefaultCIPVendorID,
+		cipSerialNumber: DefaultCIPSerialNumber,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -74,9 +83,11 @@ func Connect(ctx context.Context, address string, opts ...any) (*Client, error) 
 	}
 
 	c := &Client{
-		logger:     logging.NewNopLogger(),
-		retries:    0,
-		retryDelay: 1 * time.Second,
+		logger:          logging.NewNopLogger(),
+		retries:         0,
+		retryDelay:      1 * time.Second,
+		cipVendorID:     DefaultCIPVendorID,
+		cipSerialNumber: DefaultCIPSerialNumber,
 	}
 	for _, opt := range clientOpts {
 		opt(c)
@@ -117,9 +128,11 @@ func NewReconnectingClient(address string, opts ...any) *Client {
 	}
 
 	c := &Client{
-		logger:     logging.NewNopLogger(),
-		retries:    0,
-		retryDelay: 1 * time.Second,
+		logger:          logging.NewNopLogger(),
+		retries:         0,
+		retryDelay:      1 * time.Second,
+		cipVendorID:     DefaultCIPVendorID,
+		cipSerialNumber: DefaultCIPSerialNumber,
 	}
 	for _, opt := range clientOpts {
 		opt(c)

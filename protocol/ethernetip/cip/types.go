@@ -99,6 +99,11 @@ const (
 	ClassControlNet     UINT = 0xF0
 	ClassEthernetLink   UINT = 0xF6
 	ClassTCPIPInterface UINT = 0xF5
+
+	// ClassPCCC is the Allen-Bradley PCCC Object class. PCCC commands are
+	// tunneled to legacy SLC/MicroLogix/PLC-5 controllers via this object
+	// using the [ServiceExecutePCCC] service.
+	ClassPCCC UINT = 0x67
 )
 
 // DataType represents a CIP data type code (16-bit). Bit 15 is the array flag.

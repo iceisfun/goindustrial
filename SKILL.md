@@ -45,6 +45,13 @@ SKILLS:
 - Lua modbus API: modbus.connect(addr, opts) -> client, client:read_holding_registers(addr, qty), client:write_register(addr, val), etc.
 - Lua eip API: eip.connect(addr, opts) -> client, client:read_tag(name) -> auto-typed value, client:write_tag(name, val), client:list_tags(), etc.
 - Lua methods use colon syntax (client:method(args)); the self parameter is handled automatically.
+- PCCC for SLC 500 / MicroLogix (pccc/ sub-package): legacy AB controllers expose no named tags. Address data-table files (N7:0, B3:0/2, F8:5, T4:0.ACC, S:1) and tunnel PCCC inside CIP Execute_PCCC (class 0x67, service 0x4B). PLC-5 word-range commands are out of scope.
+- PCCC high-level client: pccc.NewClient(eip) wraps an *ethernetip.Client; implements plc.Reader + plc.Writer; methods ReadAddress / ReadWords / WriteAddress / WriteWords + Read(ctx, points...) / Write(ctx, point, data). Bit writes (e.g. B3:0/2) are read-modify-write under the hood.
+- PCCC data point: pccc.File{Address: "N7:0", Count: 1} works directly with monitor.NewMonitor — no PCCC-specific monitor code needed.
+- PCCC value decoding: integer files -> plc.TypeInt16, float -> plc.TypeFloat32, bit suffix -> plc.TypeBool, whole timer/counter/control elements -> plc.TypeBytes (use pccc.DecodeTimer / pccc.DecodeCounter, both yielding {Control, PRE, ACC} + bit accessors EN/TT/DN/CU/CD/OV/UN).
+- PCCC errors: STS / EXT STS surfaces as *pccc.Error (check with pccc.IsPCCCError); CIP-layer errors surface as cip.Error; transport errors retry via the EIP client's retry config.
+- PCCC low-level escape hatch: ethernetip.Client.ExecutePCCC(ctx, rawPCCC) sends pre-encoded PCCC bytes and returns raw reply bytes. Use pccc.EncodeTypedRead/EncodeTypedWrite + pccc.DecodeReply for the framing.
+- PCCC requestor ID: configurable per-client with ethernetip.WithCIPVendorID(uint16) / ethernetip.WithCIPSerialNumber(uint32); defaults are DefaultCIPVendorID = 0x1234 and DefaultCIPSerialNumber = 0x12345678.
 ```
 
 ## What You Usually Need To Know
@@ -332,6 +339,132 @@ Available Rockwell types: `Timer`, `Counter`, `PID`, `Control`.
 ```go
 ethernetip.Tag{Name: "MyDINT", Elements: 1}
 ethernetip.Tag{Name: "MyArray", Elements: 10}
+```
+
+## PCCC Client (SLC 500 / MicroLogix)
+
+Use when the controller is a legacy Allen-Bradley SLC 5/0x or MicroLogix —
+no named tags, only data-table files. PLC-5 word-range commands are out of
+scope. Always import alongside `protocol/ethernetip`:
+
+```go
+import (
+    "github.com/iceisfun/goindustrial/protocol/ethernetip"
+    "github.com/iceisfun/goindustrial/protocol/ethernetip/pccc"
+)
+```
+
+### Connect and Read
+
+```go
+ctx := context.Background()
+
+// Standard EIP connect — PCCC piggybacks on the existing session.
+eip, err := ethernetip.Connect(ctx, "10.30.40.71")
+if err != nil { log.Fatal(err) }
+defer eip.Close()
+
+// Wrap the EIP client. pccc.Client implements plc.Reader / plc.Writer /
+// plc.PLC, so it slots into monitor.NewMonitor unchanged.
+client := pccc.NewClient(eip)
+
+// String-addressed convenience API.
+v, err := client.ReadAddress(ctx, "N7:0")        // plc.Value, TypeInt16
+n, err := v.Int()                                  // -> int64
+
+words, err := client.ReadWords(ctx, "N7:0", 10)  // -> []int16
+f, err := client.ReadAddress(ctx, "F8:5")        // plc.TypeFloat32
+flt, _ := f.Float32()
+bit, err := client.ReadAddress(ctx, "B3:0/2")    // plc.TypeBool
+```
+
+### Write
+
+```go
+// Integer (int / int16 / uint16 all accepted).
+err := client.WriteAddress(ctx, "N7:0", 42)
+
+// Float (float32 / float64).
+err = client.WriteAddress(ctx, "F8:5", float32(3.14))
+
+// Bit — read-modify-write under the hood.
+err = client.WriteAddress(ctx, "B3:0/2", true)
+
+// Array write.
+err = client.WriteWords(ctx, "N7:0", []int16{1, 2, 3, -4, 5})
+```
+
+### Timer and Counter
+
+```go
+// Whole 3-word element returns 6 raw bytes (plc.TypeBytes).
+v, _ := client.ReadAddress(ctx, "T4:0")
+tm, _ := pccc.DecodeTimer(v.Raw)
+// tm.PRE, tm.ACC, tm.EN(), tm.TT(), tm.DN()
+
+v, _ = client.ReadAddress(ctx, "C5:0")
+c, _ := pccc.DecodeCounter(v.Raw)
+// c.PRE, c.ACC, c.CU(), c.CD(), c.DN(), c.OV(), c.UN()
+
+// Single sub-field reads return TypeInt16:
+v, _ = client.ReadAddress(ctx, "T4:0.ACC")
+```
+
+### PCCC DataPoints (for plc.PLC / monitor)
+
+```go
+pccc.File{Address: "N7:0"}
+pccc.File{Address: "F8:5"}
+pccc.File{Address: "B3:0/2"}
+pccc.File{Address: "T4:0.ACC"}
+pccc.File{Address: "N7:0", Count: 10} // read 10 consecutive INTs
+```
+
+### Address syntax
+
+| Form              | Meaning                                  |
+|-------------------|------------------------------------------|
+| `N<f>:<e>`        | integer file `f`, element `e`            |
+| `F<f>:<e>`        | float file `f`, element `e` (4 bytes)    |
+| `B<f>:<e>[/b]`    | bit file, optional bit `b` of word       |
+| `S:<e>`           | status file (always file 2)              |
+| `I:<e>` / `O:<e>` | input / output image (implicit file 1/0) |
+| `T<f>:<e>.{ACC,PRE,EN,TT,DN}` | timer + named bit/sub-element  |
+| `C<f>:<e>.{ACC,PRE,CU,CD,DN,OV,UN,UA}` | counter             |
+| `R<f>:<e>.{LEN,POS,EN,EU,DN,EM,ER,UL,IN,FD}` | control       |
+| `ST<f>:<e>`       | string file                              |
+
+### Error classification
+
+- `*pccc.Error` — non-zero PCCC STS or EXT STS. Check with
+  `pccc.IsPCCCError`. Not retried.
+- `cip.Error` — the PCCC Object returned non-zero CIP general status
+  (e.g. service not supported on this controller). Not retried.
+- Transport errors — handled by the underlying `ethernetip.Client` with
+  its configured `WithRetries` / `WithRetryDelay`.
+
+### Low-level escape hatch
+
+```go
+// Build raw PCCC frames yourself when you need a command not covered by
+// the high-level Client (e.g. an experimental FNC).
+cmd, _ := pccc.EncodeTypedRead(0x1234 /*tns*/, 2 /*bytes*/, 7, pccc.FileTypeInteger, 0, 0)
+rawReply, _ := eip.ExecutePCCC(ctx, cmd)
+reply, _ := pccc.DecodeReply(rawReply)
+// reply.Data contains the raw little-endian payload.
+```
+
+### Requestor ID (optional)
+
+```go
+// CIP vendor ID + serial number written into every Execute_PCCC header.
+// Most SLCs ignore them; override only if a deployment policy requires it.
+eip, _ := ethernetip.Connect(ctx, host,
+    ethernetip.WithCIPVendorID(0xCAFE),
+    ethernetip.WithCIPSerialNumber(0xDEADBEEF),
+)
+// Defaults: ethernetip.DefaultCIPVendorID (0x1234),
+//           ethernetip.DefaultCIPSerialNumber (0x12345678).
 ```
 
 ## Reconnecting Transport

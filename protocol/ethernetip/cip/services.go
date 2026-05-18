@@ -28,6 +28,35 @@ const ServiceWriteTag USINT = 0x4D            // Write Tag
 const ServiceReadTagFragmented USINT = 0x52   // Read Tag Fragmented
 const ServiceWriteTagFragmented USINT = 0x53  // Write Tag Fragmented
 
+// ServiceExecutePCCC is the Allen-Bradley Execute_PCCC service code used to
+// tunnel a PCCC command inside a CIP message router request addressed to
+// the [ClassPCCC] object.
+const ServiceExecutePCCC USINT = 0x4B
+
+// NewExecutePCCCRequest builds an Execute_PCCC (0x4B) request targeting the
+// PCCC Object (class 0x67, instance 1). The request data is the
+// requestor-ID header followed by the PCCC command. The header format is:
+//
+//	Length:1 (always 7) Vendor:UINT Serial:UDINT
+//
+// pcccCmd is the raw PCCC command bytes (built with the pccc package).
+func NewExecutePCCCRequest(vendorID UINT, serialNumber UDINT, pcccCmd []byte) *MessageRouterRequest {
+	reqData := make([]byte, 7+len(pcccCmd))
+	reqData[0] = 0x07 // Requestor ID length, including this byte
+	reqData[1] = byte(vendorID)
+	reqData[2] = byte(vendorID >> 8)
+	reqData[3] = byte(serialNumber)
+	reqData[4] = byte(serialNumber >> 8)
+	reqData[5] = byte(serialNumber >> 16)
+	reqData[6] = byte(serialNumber >> 24)
+	copy(reqData[7:], pcccCmd)
+	return &MessageRouterRequest{
+		Service:     ServiceExecutePCCC,
+		RequestPath: BuildPath(ClassPCCC, 1, 0),
+		RequestData: reqData,
+	}
+}
+
 // NewReadTagRequest creates a Rockwell Logix Read Tag (0x4C) request. tagPath
 // should contain a symbolic segment addressing the tag by name, and elements
 // specifies how many array elements to read (use 1 for scalar tags).
