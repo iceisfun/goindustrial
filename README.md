@@ -22,6 +22,7 @@ goindustrial/
     protocol/ethernetip/eip/     EIP encapsulation layer
     protocol/ethernetip/objects/ CIP objects (Assembly, Connection Manager)
     protocol/ethernetip/runtime/ UDP I/O runtime and scheduler for implicit messaging
+    protocol/ethernetip/pccc/    PCCC tunneling for SLC 500 / MicroLogix
 
     lua/                         Optional GoLua bindings (requires github.com/iceisfun/golua/v2)
     examples/                    Runnable examples with READMEs (see below)
@@ -102,18 +103,18 @@ ctx := context.Background()
 eip, _ := ethernetip.Connect(ctx, "10.30.40.71")
 defer eip.Close()
 
-// High-level PCCC client implements plc.Reader / plc.Writer.
-plc := pccc.NewClient(eip)
+// High-level PCCC client implements plc.Reader / plc.Writer / plc.PLC.
+client := pccc.NewClient(eip)
 
 // Convenience methods address by SLC string.
-v, _   := plc.ReadAddress(ctx, "N7:0")         // -> plc.Value (int16)
-words, _ := plc.ReadWords(ctx, "N7:0", 10)      // -> []int16
-_ = plc.WriteAddress(ctx, "F8:5", float32(3.14))
-_ = plc.WriteAddress(ctx, "B3:0/2", true)       // read-modify-write
+v, _     := client.ReadAddress(ctx, "N7:0")        // -> plc.Value (int16)
+words, _ := client.ReadWords(ctx, "N7:0", 10)       // -> []int16
+_ = client.WriteAddress(ctx, "F8:5", float32(3.14))
+_ = client.WriteAddress(ctx, "B3:0/2", true)        // read-modify-write
 
 // Timer / counter whole-element reads decode to typed structs.
-v, _ = plc.ReadAddress(ctx, "T4:0")
-tm, _ := pccc.DecodeTimer(v.Raw)                // tm.PRE, tm.ACC, tm.EN(), tm.DN()
+v, _ = client.ReadAddress(ctx, "T4:0")
+tm, _ := pccc.DecodeTimer(v.Raw)                    // tm.PRE, tm.ACC, tm.EN(), tm.DN()
 
 // pccc.File works as a plc.DataPoint with monitor.NewMonitor — see
 // examples/ethernetip/pccc_monitor.
