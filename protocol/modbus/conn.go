@@ -47,7 +47,6 @@ func NewTCPConn(host string, options ...TCPConnOption) *TCPConn {
 		timeout:         30 * time.Second,
 		connected:       false,
 		transactionPool: NewTransactionPool(),
-		writeChan:       make(chan *Transaction, 100),
 		done:            make(chan struct{}),
 	}
 
@@ -61,14 +60,27 @@ func NewTCPConn(host string, options ...TCPConnOption) *TCPConn {
 // Connect establishes the TCP connection and starts read/write goroutines.
 // If a net.Conn was injected via WithConn, it is used directly instead of dialing.
 func (c *TCPConn) Connect(ctx context.Context) error {
+	// All logging happens outside the mutex: a logger callback that touches
+	// the conn (e.g. IsConnected) must not deadlock against it.
+	c.logger.Info(ctx, "Connecting to Modbus TCP server at %s:%d", c.host, c.port)
+
+	if err := c.connect(ctx); err != nil {
+		c.logger.Error(ctx, "Failed to connect to %s:%d: %v", c.host, c.port, err)
+		return err
+	}
+
+	c.logger.Info(ctx, "Connected to Modbus TCP server at %s:%d", c.host, c.port)
+	return nil
+}
+
+// connect is Connect without the logging; it holds c.mutex for the duration.
+func (c *TCPConn) connect(ctx context.Context) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
 	if c.connected {
 		return ErrAlreadyConnected
 	}
-
-	c.logger.Info(ctx, "Connecting to Modbus TCP server at %s:%d", c.host, c.port)
 
 	// The previous connection's teardown closed its transaction pool (stopping
 	// the timeout monitor), so a reconnect needs a fresh one.
@@ -80,10 +92,6 @@ func (c *TCPConn) Connect(ctx context.Context) error {
 		c.transactionPool.transactionsMu.Lock()
 		c.transactionPool.unsafeReset()
 		c.transactionPool.transactionsMu.Unlock()
-	}
-
-	if c.writeChan == nil {
-		c.writeChan = make(chan *Transaction, 100)
 	}
 
 	if c.injectedConn != nil {
@@ -103,7 +111,10 @@ func (c *TCPConn) Connect(ctx context.Context) error {
 		addr := fmt.Sprintf("%s:%d", c.host, c.port)
 		conn, err := dialer.DialContext(ctx, "tcp", addr)
 		if err != nil {
-			c.logger.Error(ctx, "Failed to connect to %s: %v", addr, err)
+			// The conn may be discarded after a failed dial (TCPConnector
+			// does exactly that on every transport retry), so stop the pool's
+			// timeout monitor here or it leaks one goroutine per attempt.
+			c.transactionPool.Close()
 			return err
 		}
 
@@ -117,19 +128,21 @@ func (c *TCPConn) Connect(ctx context.Context) error {
 		c.writer = c.hexDumper.WrapWriter(c.writer)
 	}
 
-	// Each connection is a new generation with its own done channel and
-	// re-armed closeOnce. The loops receive their generation's state as
-	// parameters so goroutines from a previous connection can never touch —
-	// or be confused by — the state of a newer one.
+	// Each connection is a new generation with its own done channel, write
+	// channel, and re-armed closeOnce. The loops receive their generation's
+	// state as parameters so goroutines from a previous connection can never
+	// touch — or be confused by — the state of a newer one. The write channel
+	// in particular must not be shared: a stale write loop that has not yet
+	// exited would race the new loop for queued transactions and complete
+	// stolen ones with ErrTransportClosing.
 	c.gen++
 	c.done = make(chan struct{})
+	c.writeChan = make(chan *Transaction, 100)
 	c.closeOnce = sync.Once{}
 	c.connected = true
 
-	c.logger.Info(ctx, "Connected to Modbus TCP server at %s:%d", c.host, c.port)
-
 	go c.readLoop(c.gen, c.done, c.conn, c.reader, c.transactionPool)
-	go c.writeLoop(c.gen, c.done, c.writer)
+	go c.writeLoop(c.gen, c.done, c.writer, c.writeChan)
 
 	return nil
 }
@@ -139,11 +152,12 @@ func (c *TCPConn) Connect(ctx context.Context) error {
 // a silent no-op.
 func (c *TCPConn) Disconnect(ctx context.Context) error {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	c.connected = false
-
 	closedSocket, err := c.unsafeTeardown()
+	c.mutex.Unlock()
+
+	// Log outside the mutex so a logger callback into the conn cannot
+	// deadlock.
 	if closedSocket {
 		c.logger.Info(ctx, "Disconnected from Modbus TCP server")
 	}
@@ -186,10 +200,11 @@ func (c *TCPConn) IsConnected() bool {
 // assigned automatically by the underlying [TransactionPool].
 func (c *TCPConn) Send(ctx context.Context, request *Request) (*Response, error) {
 	// Snapshot the current generation's state under the mutex: Connect
-	// replaces done and transactionPool on reconnect.
+	// replaces done, writeChan, and transactionPool on reconnect.
 	c.mutex.Lock()
 	connected := c.connected
 	done := c.done
+	writeChan := c.writeChan
 	pool := c.transactionPool
 	c.mutex.Unlock()
 
@@ -208,7 +223,7 @@ func (c *TCPConn) Send(ctx context.Context, request *Request) (*Response, error)
 	c.logger.Debug(ctx, "Created transaction %d", request.GetTransactionID())
 
 	select {
-	case c.writeChan <- tx:
+	case writeChan <- tx:
 		c.logger.Debug(ctx, "Queued transaction %d for writing", request.GetTransactionID())
 	case <-ctx.Done():
 		pool.Release(request.GetTransactionID())
@@ -360,11 +375,11 @@ func (c *TCPConn) readLoop(gen uint64, done chan struct{}, conn net.Conn, reader
 	}
 }
 
-// writeLoop continuously processes requests from the writeChan. Like
-// readLoop, it receives its generation's state as parameters; the done
-// channel — closed exactly once per generation by unsafeTeardown — is the
-// single signal that this loop's connection is gone.
-func (c *TCPConn) writeLoop(gen uint64, done chan struct{}, writer io.Writer) {
+// writeLoop continuously processes requests from its generation's write
+// channel. Like readLoop, it receives its generation's state as parameters;
+// the done channel — closed exactly once per generation by unsafeTeardown —
+// is the single signal that this loop's connection is gone.
+func (c *TCPConn) writeLoop(gen uint64, done chan struct{}, writer io.Writer, writeChan <-chan *Transaction) {
 	ctx := context.Background()
 	c.logger.Debug(ctx, "Starting write loop")
 
@@ -377,7 +392,7 @@ func (c *TCPConn) writeLoop(gen uint64, done chan struct{}, writer io.Writer) {
 		select {
 		case <-done:
 			return
-		case tx, ok := <-c.writeChan:
+		case tx, ok := <-writeChan:
 			if !ok {
 				return
 			}
@@ -453,21 +468,22 @@ func (c *TCPConn) processError(pool *TransactionPool, txID TransactionID, err er
 // connection established by a subsequent Connect.
 func (c *TCPConn) setDisconnected(gen uint64, err error) {
 	ctx := context.Background()
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
 
+	c.mutex.Lock()
 	if gen != c.gen {
+		c.mutex.Unlock()
 		return
 	}
-
 	wasConnected := c.connected
 	c.connected = false
+	c.unsafeTeardown()
+	c.mutex.Unlock()
 
+	// Log outside the mutex so a logger callback into the conn cannot
+	// deadlock the teardown.
 	if wasConnected {
 		c.logger.Error(ctx, "Connection disconnected: %v", err)
 	}
-
-	c.unsafeTeardown()
 }
 
 // ---------------------------------------------------------------------------
