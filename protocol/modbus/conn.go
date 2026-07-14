@@ -319,17 +319,25 @@ func (c *TCPConn) readLoop(gen uint64, done chan struct{}, conn net.Conn, reader
 
 			c.logger.Debug(ctx, "Received response: txID=%d, length=%d", transactionID, length)
 
+			// A violated MBAP framing invariant means the byte stream can no
+			// longer be trusted: continuing would parse subsequent responses
+			// from an arbitrary offset (the old `continue` here never consumed
+			// the invalid frame's body, silently desynchronizing the stream).
+			// Fail the transaction and tear the connection down; the
+			// reconnecting transport recovers with a clean stream.
 			if protocolID != TCPProtocolIdentifier {
 				c.logger.Error(ctx, "Invalid protocol ID: %d", protocolID)
 				c.processError(pool, transactionID, ErrInvalidProtocolHeader)
-				continue
+				c.setDisconnected(gen, ErrInvalidProtocolHeader)
+				return
 			}
 
 			bodyLength := int(length) - 1
 			if bodyLength <= 0 {
 				c.logger.Error(ctx, "Invalid response length: %d", length)
 				c.processError(pool, transactionID, ErrInvalidResponseLength)
-				continue
+				c.setDisconnected(gen, ErrInvalidResponseLength)
+				return
 			}
 
 			body := make([]byte, bodyLength)
