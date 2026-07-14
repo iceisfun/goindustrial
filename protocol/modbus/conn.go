@@ -30,6 +30,7 @@ type TCPConn struct {
 	mutex           sync.Mutex
 	connected       bool
 	closeOnce       sync.Once
+	gen             uint64 // connection generation; guards against stale goroutines
 	transactionPool *TransactionPool
 	writeChan       chan *Transaction
 	done            chan struct{}
@@ -69,17 +70,17 @@ func (c *TCPConn) Connect(ctx context.Context) error {
 
 	c.logger.Info(ctx, "Connecting to Modbus TCP server at %s:%d", c.host, c.port)
 
-	// Reset done channel if reconnecting.
+	// The previous connection's teardown closed its transaction pool (stopping
+	// the timeout monitor), so a reconnect needs a fresh one.
 	select {
-	case <-c.done:
-		c.done = make(chan struct{})
+	case <-c.transactionPool.done:
+		c.transactionPool = NewTransactionPool()
 	default:
+		// Fresh pool from the constructor; reset for a clean state.
+		c.transactionPool.transactionsMu.Lock()
+		c.transactionPool.unsafeReset()
+		c.transactionPool.transactionsMu.Unlock()
 	}
-
-	// Reset the transaction pool for a clean state.
-	c.transactionPool.transactionsMu.Lock()
-	c.transactionPool.unsafeReset()
-	c.transactionPool.transactionsMu.Unlock()
 
 	if c.writeChan == nil {
 		c.writeChan = make(chan *Transaction, 100)
@@ -116,53 +117,61 @@ func (c *TCPConn) Connect(ctx context.Context) error {
 		c.writer = c.hexDumper.WrapWriter(c.writer)
 	}
 
+	// Each connection is a new generation with its own done channel and
+	// re-armed closeOnce. The loops receive their generation's state as
+	// parameters so goroutines from a previous connection can never touch —
+	// or be confused by — the state of a newer one.
+	c.gen++
+	c.done = make(chan struct{})
 	c.closeOnce = sync.Once{}
 	c.connected = true
 
 	c.logger.Info(ctx, "Connected to Modbus TCP server at %s:%d", c.host, c.port)
 
-	go c.readLoop()
-	go c.writeLoop()
+	go c.readLoop(c.gen, c.done, c.conn, c.reader, c.transactionPool)
+	go c.writeLoop(c.gen, c.done, c.writer)
 
 	return nil
 }
 
-// Disconnect closes the TCP connection.
+// Disconnect closes the TCP connection. If the connection was already torn
+// down (e.g. the peer closed it and the read loop cleaned up), Disconnect is
+// a silent no-op.
 func (c *TCPConn) Disconnect(ctx context.Context) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	c.logger.Info(ctx, "Disconnecting from Modbus TCP server")
-
 	c.connected = false
 
-	// Tear down exactly once, gated on closeOnce rather than the connected
-	// flag. The read/write loops call setDisconnected the instant the peer
-	// closes the socket (a clean FIN surfaces as io.EOF in readLoop), which
-	// clears c.connected. A `if !c.connected { return }` guard here would then
-	// make the subsequent Disconnect (fired by the transport's Reset) a no-op
-	// and never close the socket, leaking the fd: it sits in CLOSE_WAIT and is
-	// orphaned when a new connection replaces it. Because Connect re-arms
-	// closeOnce (and c.done), each connection is still torn down at most once,
-	// so close(c.done) cannot panic on a double close.
-	var err error
+	closedSocket, err := c.unsafeTeardown()
+	if closedSocket {
+		c.logger.Info(ctx, "Disconnected from Modbus TCP server")
+	}
+	return err
+}
+
+// unsafeTeardown releases everything the current connection generation holds:
+// it closes the done channel (stopping the read/write loops), closes the
+// transaction pool (cancelling in-flight transactions and stopping the
+// timeout monitor goroutine), and closes the socket. It runs at most once per
+// generation — Connect re-arms closeOnce along with c.done — so it is safe to
+// call from both Disconnect and setDisconnected regardless of who observed
+// the drop first; the fd is released exactly once and close(c.done) cannot
+// panic on a double close. Returns whether this call closed a live socket.
+// Caller must hold c.mutex.
+func (c *TCPConn) unsafeTeardown() (closedSocket bool, err error) {
 	c.closeOnce.Do(func() {
 		close(c.done)
 
-		// Give goroutines a moment to notice the done channel.
-		time.Sleep(10 * time.Millisecond)
-
-		c.transactionPool.transactionsMu.Lock()
-		c.transactionPool.unsafeReset()
-		c.transactionPool.transactionsMu.Unlock()
+		c.transactionPool.Close()
 
 		if c.conn != nil {
+			closedSocket = true
 			err = c.conn.Close()
 		}
 	})
 
-	c.logger.Info(ctx, "Disconnected from Modbus TCP server")
-	return err
+	return closedSocket, err
 }
 
 // IsConnected returns true if the connection is active.
@@ -176,13 +185,21 @@ func (c *TCPConn) IsConnected() bool {
 // the context expires, or the connection is closed. The MBAP transaction ID is
 // assigned automatically by the underlying [TransactionPool].
 func (c *TCPConn) Send(ctx context.Context, request *Request) (*Response, error) {
-	if !c.IsConnected() {
+	// Snapshot the current generation's state under the mutex: Connect
+	// replaces done and transactionPool on reconnect.
+	c.mutex.Lock()
+	connected := c.connected
+	done := c.done
+	pool := c.transactionPool
+	c.mutex.Unlock()
+
+	if !connected {
 		return nil, ErrNotConnected
 	}
 
 	c.logger.Debug(ctx, "Sending request: function=%d", request.GetPDU().FunctionCode)
 
-	tx, err := c.transactionPool.Place(ctx, request)
+	tx, err := pool.Place(ctx, request)
 	if err != nil {
 		c.logger.Error(ctx, "Failed to create transaction: %v", err)
 		return nil, fmt.Errorf("failed to create transaction: %w", err)
@@ -194,10 +211,10 @@ func (c *TCPConn) Send(ctx context.Context, request *Request) (*Response, error)
 	case c.writeChan <- tx:
 		c.logger.Debug(ctx, "Queued transaction %d for writing", request.GetTransactionID())
 	case <-ctx.Done():
-		c.transactionPool.Release(request.GetTransactionID())
+		pool.Release(request.GetTransactionID())
 		return nil, ctx.Err()
-	case <-c.done:
-		c.transactionPool.Release(request.GetTransactionID())
+	case <-done:
+		pool.Release(request.GetTransactionID())
 		return nil, ErrTransportClosing
 	}
 
@@ -218,45 +235,48 @@ func (c *TCPConn) Send(ctx context.Context, request *Request) (*Response, error)
 func (c *TCPConn) ResetTransactions(ctx context.Context) {
 	c.logger.Info(ctx, "Resetting transaction pool")
 
-	c.transactionPool.transactionsMu.Lock()
-	defer c.transactionPool.transactionsMu.Unlock()
+	c.mutex.Lock()
+	pool := c.transactionPool
+	c.mutex.Unlock()
 
-	c.transactionPool.unsafeReset()
+	pool.transactionsMu.Lock()
+	defer pool.transactionsMu.Unlock()
+
+	pool.unsafeReset()
 
 	c.logger.Info(ctx, "Transaction pool has been reset")
 }
 
-// readLoop continuously reads responses from the TCP connection.
-func (c *TCPConn) readLoop() {
+// readLoop continuously reads responses from the TCP connection. It receives
+// its generation's state as parameters rather than reading TCPConn fields, so
+// a loop from a previous connection can never observe (or act on) the state
+// of a newer one after a reconnect.
+func (c *TCPConn) readLoop(gen uint64, done chan struct{}, conn net.Conn, reader io.Reader, pool *TransactionPool) {
 	ctx := context.Background()
 	c.logger.Debug(ctx, "Starting read loop")
 
 	defer func() {
 		c.logger.Debug(ctx, "Exiting read loop")
-		c.setDisconnected(fmt.Errorf("read loop exited"))
+		c.setDisconnected(gen, fmt.Errorf("read loop exited"))
 	}()
 
 	readTimeout := 100 * time.Millisecond
 
 	for {
 		select {
-		case <-c.done:
+		case <-done:
 			return
 		default:
-			if !c.IsConnected() {
-				return
-			}
-
-			if deadline, ok := c.conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+			if deadline, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
 				deadline.SetReadDeadline(time.Now().Add(readTimeout))
 			}
 
 			header := make([]byte, TCPHeaderLength)
-			_, err := io.ReadFull(c.reader, header)
+			_, err := io.ReadFull(reader, header)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					select {
-					case <-c.done:
+					case <-done:
 						return
 					default:
 						continue
@@ -264,11 +284,11 @@ func (c *TCPConn) readLoop() {
 				}
 
 				select {
-				case <-c.done:
+				case <-done:
 					return
 				default:
 					c.logger.Error(ctx, "Error reading header: %v", err)
-					c.setDisconnected(fmt.Errorf("read error: %w", err))
+					c.setDisconnected(gen, fmt.Errorf("read error: %w", err))
 					return
 				}
 			}
@@ -286,23 +306,23 @@ func (c *TCPConn) readLoop() {
 
 			if protocolID != TCPProtocolIdentifier {
 				c.logger.Error(ctx, "Invalid protocol ID: %d", protocolID)
-				c.processError(transactionID, ErrInvalidProtocolHeader)
+				c.processError(pool, transactionID, ErrInvalidProtocolHeader)
 				continue
 			}
 
 			bodyLength := int(length) - 1
 			if bodyLength <= 0 {
 				c.logger.Error(ctx, "Invalid response length: %d", length)
-				c.processError(transactionID, ErrInvalidResponseLength)
+				c.processError(pool, transactionID, ErrInvalidResponseLength)
 				continue
 			}
 
 			body := make([]byte, bodyLength)
-			_, err = io.ReadFull(c.reader, body)
+			_, err = io.ReadFull(reader, body)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					select {
-					case <-c.done:
+					case <-done:
 						return
 					default:
 						continue
@@ -310,12 +330,12 @@ func (c *TCPConn) readLoop() {
 				}
 
 				select {
-				case <-c.done:
+				case <-done:
 					return
 				default:
 					c.logger.Error(ctx, "Error reading body: %v", err)
-					c.processError(transactionID, fmt.Errorf("read body error: %w", err))
-					c.setDisconnected(err)
+					c.processError(pool, transactionID, fmt.Errorf("read body error: %w", err))
+					c.setDisconnected(gen, err)
 					return
 				}
 			}
@@ -328,7 +348,7 @@ func (c *TCPConn) readLoop() {
 			responseData := body[1:]
 			response := NewResponse(transactionID, unitID, functionCode, responseData)
 
-			tx, ok := c.transactionPool.Release(transactionID)
+			tx, ok := pool.Release(transactionID)
 			if !ok {
 				c.logger.Warn(ctx, "Received response for unknown transaction ID: %d", transactionID)
 				continue
@@ -340,31 +360,25 @@ func (c *TCPConn) readLoop() {
 	}
 }
 
-// writeLoop continuously processes requests from the writeChan.
-func (c *TCPConn) writeLoop() {
+// writeLoop continuously processes requests from the writeChan. Like
+// readLoop, it receives its generation's state as parameters; the done
+// channel — closed exactly once per generation by unsafeTeardown — is the
+// single signal that this loop's connection is gone.
+func (c *TCPConn) writeLoop(gen uint64, done chan struct{}, writer io.Writer) {
 	ctx := context.Background()
 	c.logger.Debug(ctx, "Starting write loop")
 
 	defer func() {
 		c.logger.Debug(ctx, "Exiting write loop")
-		c.setDisconnected(fmt.Errorf("write loop exited"))
+		c.setDisconnected(gen, fmt.Errorf("write loop exited"))
 	}()
 
 	for {
-		if !c.IsConnected() {
-			return
-		}
-
 		select {
-		case <-c.done:
+		case <-done:
 			return
 		case tx, ok := <-c.writeChan:
 			if !ok {
-				return
-			}
-
-			if !c.IsConnected() {
-				tx.Complete(nil, ErrNotConnected)
 				return
 			}
 
@@ -373,7 +387,7 @@ func (c *TCPConn) writeLoop() {
 				c.logger.Debug(ctx, "Transaction %d was cancelled before writing",
 					tx.Request.GetTransactionID())
 				continue
-			case <-c.done:
+			case <-done:
 				tx.Complete(nil, ErrTransportClosing)
 				return
 			default:
@@ -394,22 +408,22 @@ func (c *TCPConn) writeLoop() {
 			}
 
 			select {
-			case <-c.done:
+			case <-done:
 				tx.Complete(nil, ErrTransportClosing)
 				return
 			default:
 			}
 
-			_, err = c.writer.Write(data)
+			_, err = writer.Write(data)
 			if err != nil {
 				select {
-				case <-c.done:
+				case <-done:
 					tx.Complete(nil, ErrTransportClosing)
 					return
 				default:
 					c.logger.Error(ctx, "Error writing request: %v", err)
 					tx.Complete(nil, err)
-					c.setDisconnected(fmt.Errorf("write error: %w", err))
+					c.setDisconnected(gen, fmt.Errorf("write error: %w", err))
 					return
 				}
 			}
@@ -421,9 +435,9 @@ func (c *TCPConn) writeLoop() {
 }
 
 // processError handles errors for a specific transaction.
-func (c *TCPConn) processError(txID TransactionID, err error) {
+func (c *TCPConn) processError(pool *TransactionPool, txID TransactionID, err error) {
 	ctx := context.Background()
-	if tx, ok := c.transactionPool.Release(txID); ok {
+	if tx, ok := pool.Release(txID); ok {
 		c.logger.Debug(ctx, "Processing error for transaction %d: %v", txID, err)
 		tx.Complete(nil, err)
 	} else {
@@ -431,21 +445,29 @@ func (c *TCPConn) processError(txID TransactionID, err error) {
 	}
 }
 
-// setDisconnected marks the connection as disconnected.
-func (c *TCPConn) setDisconnected(err error) {
+// setDisconnected marks the connection as disconnected and tears it down,
+// releasing the socket and pool even when the drop was peer-initiated and no
+// Disconnect call ever arrives. gen is the connection generation the calling
+// goroutine belongs to: a call from a loop of a previous connection is
+// ignored, so a lingering goroutine can never clobber the state of a newer
+// connection established by a subsequent Connect.
+func (c *TCPConn) setDisconnected(gen uint64, err error) {
 	ctx := context.Background()
 	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if gen != c.gen {
+		return
+	}
+
 	wasConnected := c.connected
 	c.connected = false
-	c.mutex.Unlock()
 
 	if wasConnected {
 		c.logger.Error(ctx, "Connection disconnected: %v", err)
-
-		c.transactionPool.transactionsMu.Lock()
-		c.transactionPool.unsafeReset()
-		c.transactionPool.transactionsMu.Unlock()
 	}
+
+	c.unsafeTeardown()
 }
 
 // ---------------------------------------------------------------------------
