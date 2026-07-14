@@ -132,21 +132,26 @@ func (c *TCPConn) Disconnect(ctx context.Context) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if !c.connected {
-		return nil
-	}
-
 	c.logger.Info(ctx, "Disconnecting from Modbus TCP server")
 
 	c.connected = false
 
-	close(c.done)
-
-	// Give goroutines a moment to notice the done channel.
-	time.Sleep(10 * time.Millisecond)
-
+	// Tear down exactly once, gated on closeOnce rather than the connected
+	// flag. The read/write loops call setDisconnected the instant the peer
+	// closes the socket (a clean FIN surfaces as io.EOF in readLoop), which
+	// clears c.connected. A `if !c.connected { return }` guard here would then
+	// make the subsequent Disconnect (fired by the transport's Reset) a no-op
+	// and never close the socket, leaking the fd: it sits in CLOSE_WAIT and is
+	// orphaned when a new connection replaces it. Because Connect re-arms
+	// closeOnce (and c.done), each connection is still torn down at most once,
+	// so close(c.done) cannot panic on a double close.
 	var err error
 	c.closeOnce.Do(func() {
+		close(c.done)
+
+		// Give goroutines a moment to notice the done channel.
+		time.Sleep(10 * time.Millisecond)
+
 		c.transactionPool.transactionsMu.Lock()
 		c.transactionPool.unsafeReset()
 		c.transactionPool.transactionsMu.Unlock()
